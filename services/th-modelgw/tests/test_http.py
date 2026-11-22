@@ -266,6 +266,33 @@ async def test_explicit_upstream_failures_are_not_cached(
     assert not cache.entries
 
 
+async def test_provider_failure_does_not_return_an_expired_cached_answer() -> None:
+    calls = 0
+
+    def upstream(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return completion({"text": "Previously generated checklist", "confidence": 0.8})
+        return httpx.Response(503)
+
+    cache = MemoryCache()
+    payload = body("document_draft", [PUBLIC_TEXT])
+    async with client_for(upstream, cache) as client:
+        first = await client.post(PATH, json=payload)
+        assert first.status_code == 200
+        assert len(cache.entries) == 1
+
+        cache.entries.clear()  # Redis GET returns a miss after the TTL expires.
+        result = await client.post(PATH, json=payload)
+
+    assert calls == 4
+    assert result.status_code == 503
+    assert result.json()["code"] == "provider_unavailable"
+    assert "answer" not in result.json()
+    assert not cache.entries
+
+
 async def test_embeddings_are_ordered_and_tied_to_the_input() -> None:
     def upstream(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/embeddings"
