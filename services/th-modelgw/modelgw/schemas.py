@@ -25,6 +25,11 @@ class PublicText(Contract):
     text: Text
 
 
+class SyntheticText(Contract):
+    type: Literal["synthetic_text"]
+    text: Text
+
+
 class SensitiveText(Contract):
     type: Literal["sensitive_text"]
     category: Category
@@ -48,7 +53,8 @@ class Knowledge(Contract):
 
 
 type ContextItem = Annotated[
-    PublicText | SensitiveText | PublicImage | Penalty | Knowledge, Field(discriminator="type")
+    PublicText | SyntheticText | SensitiveText | PublicImage | Penalty | Knowledge,
+    Field(discriminator="type"),
 ]
 
 
@@ -63,9 +69,11 @@ class InferenceRequest(Contract):
 class ModelRisk(Contract):
     summary: Text
     risk_level: Literal["low", "medium", "high"]
-    penalty_daily_percent: Percent | None = None
+    penalty_daily_percent: Percent | None
     confidence: Confidence
-    sources: Annotated[list[Annotated[int, Field(ge=1, strict=True)]], Field(max_length=12)]
+    sources: Annotated[
+        list[Annotated[int, Field(ge=1, strict=True)]], Field(min_length=1, max_length=12)
+    ]
 
 
 class ModelText(Contract):

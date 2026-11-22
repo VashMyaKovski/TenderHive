@@ -7,7 +7,14 @@ from PIL import Image
 
 from modelgw.errors import Failure, GatewayError
 from modelgw.privacy import redact_public_text
-from modelgw.schemas import InferenceRequest, Knowledge, Penalty, PublicImage, PublicText
+from modelgw.schemas import (
+    InferenceRequest,
+    Knowledge,
+    Penalty,
+    PublicImage,
+    PublicText,
+    SyntheticText,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,12 +23,12 @@ class PreparedContext:
     image_url: str | None
     knowledge: Knowledge | None
     penalty: Penalty | None
+    synthetic: bool
 
 
 def prepare_context(request: InferenceRequest) -> PreparedContext:
-    public_texts = tuple(
-        redact_public_text(item.text) for item in request.context if isinstance(item, PublicText)
-    )
+    text_items = [item for item in request.context if isinstance(item, PublicText | SyntheticText)]
+    public_texts = tuple(redact_public_text(item.text) for item in text_items)
     images = [item for item in request.context if isinstance(item, PublicImage)]
     rules = [item for item in request.context if isinstance(item, Knowledge)]
     penalties = [item for item in request.context if isinstance(item, Penalty)]
@@ -43,6 +50,9 @@ def prepare_context(request: InferenceRequest) -> PreparedContext:
         image_url=_normalize_image(images[0].data) if images else None,
         knowledge=rules[0] if rules else None,
         penalty=penalties[0] if penalties else None,
+        synthetic=bool(text_items)
+        and not images
+        and all(isinstance(item, SyntheticText) for item in text_items),
     )
 
 

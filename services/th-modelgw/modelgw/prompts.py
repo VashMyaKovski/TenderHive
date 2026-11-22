@@ -17,7 +17,8 @@ PROMPTS = MappingProxyType(
                 + 'Return {"summary": string, "risk_level": "low"|"medium"|"high", '
                 '"penalty_daily_percent": number|null, "confidence": number, "sources": [integer]}. '
                 "Cite only source_id values in the evidence. Use null for a missing penalty. "
-                "Percentage units are literal: 0.15 means 0.15 percent per day.",
+                "Keep numbers out of the summary. Percentage units are literal: "
+                "0.15 means 0.15 percent per day.",
                 "document_draft": _ROLE
                 + 'Return {"text": string, "confidence": number} with a draft. '
                 "Mark missing information as placeholders and do not invent procurement figures.",
