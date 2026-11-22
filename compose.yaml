@@ -128,6 +128,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
     volumes:
       - ./infra/monitoring/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/tenderhive.yaml:ro
+      - ./infra/monitoring/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/tenderhive.yaml:ro
+      - ./infra/monitoring/dashboards:/var/lib/grafana/dashboards/tenderhive:ro
     ports: ["127.0.0.1:${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in .env}:3000"]
 
 volumes:
