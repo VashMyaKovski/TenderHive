@@ -1,0 +1,2 @@
+{"schema_version":1,"dataset_version":"gateway-contract-v1"}
+{"case_id":"e1ec8afd-547b-4e6c-84f3-8949606bd980","stratum":"negative","live":true,"context":[{"type":"synthetic_text","text":"Synthetic example for the gateway contract check."},{"type":"knowledge","rules_version":"kb-eval-v1","penalty_daily_threshold_percent":"0.1"},{"type":"penalty","daily_percent":"0.01"}],"expected":{"kind":"error","status":422,"code":"unsupported_prompt_version"}}
