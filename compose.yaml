@@ -54,6 +54,30 @@ services:
       timeout: 3s
       retries: 10
 
+  th-modelgw:
+    profiles: ["modelgw"]
+    build:
+      context: ./services/th-modelgw
+    env_file:
+      - ./services/th-modelgw/.env.example
+      - path: ./services/th-modelgw/.env
+        required: false
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY-}
+      OPENROUTER_MODEL_TEST: ${OPENROUTER_MODEL_TEST-}
+      MODEL_GW_PORT: ${MODEL_GW_PORT:-8000}
+    ports:
+      - "127.0.0.1:${MODEL_GW_HOST_PORT:-8001}:${MODEL_GW_PORT:-8000}"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "modelgw", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   kafka:
     image: apache/kafka:4.1.2
     environment:
