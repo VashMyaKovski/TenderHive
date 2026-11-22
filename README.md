@@ -22,6 +22,8 @@ docker compose ps
 
 `kafka-init` создаёт пять тем из [контракта Kafka](contracts/README.md). Команду можно запускать повторно. Compose поднимает зависимости будущих сервисов. Каждый сервис добавляет свой запуск и миграции по мере реализации.
 
+Контролируемый регрессионный прогон `th-eval` запускается командой `docker compose --env-file .env.example run --build --rm th-eval`. Настройки live-прогона, формат отчётов и сравнение версий описаны в [документации модуля](services/th-eval/README.md).
+
 | Компонент | Адрес с хоста по умолчанию | Адрес внутри Compose |
 | --- | --- | --- |
 | PostgreSQL | `127.0.0.1:5432` | `postgres:5432` |
@@ -42,5 +44,5 @@ uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked pyright
 uv run --locked pytest
-docker compose --env-file .env.example --profile monitoring --profile setup config --quiet
+docker compose --env-file .env.example --profile monitoring --profile setup --profile eval config --quiet
 ```

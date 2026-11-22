@@ -26,13 +26,22 @@ jobs:
       - run: uv run --locked ruff format --check .
       - run: uv run --locked pyright
       - run: uv run --locked pytest
+      - name: Check evaluation runner
+        working-directory: services/th-eval
+        run: |
+          uv sync --locked
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked pyright
+          uv run --locked pytest
 
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - run: docker compose --env-file .env.example --profile monitoring --profile setup config --quiet
+      - run: docker compose --env-file .env.example --profile monitoring --profile setup --profile eval config --quiet
+      - run: docker compose --env-file .env.example run --build --rm th-eval
       - run: docker compose --env-file .env.example --profile monitoring up --wait --wait-timeout 180
       - run: docker compose --env-file .env.example run --rm kafka-init
       - name: Check monitoring endpoints
@@ -47,4 +56,4 @@ jobs:
         run: docker compose --env-file .env.example --profile monitoring logs --no-color
       - name: Stop the stack
         if: always()
-        run: docker compose --env-file .env.example --profile monitoring down
+        run: docker compose --env-file .env.example --profile monitoring --profile eval down

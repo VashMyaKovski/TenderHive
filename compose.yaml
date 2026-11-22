@@ -90,6 +90,19 @@ services:
     volumes:
       - ./infra/kafka/create-topics.sh:/opt/tenderhive/create-topics.sh:ro
 
+  th-eval:
+    profiles: ["eval"]
+    build:
+      context: ./services/th-eval
+    env_file:
+      - ./services/th-eval/.env.example
+      - path: ./services/th-eval/.env
+        required: false
+    environment:
+      TH_EVAL_REPORT_DIR: /reports
+    volumes:
+      - eval_reports:/reports
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.165.0
     profiles: ["monitoring"]
@@ -122,3 +135,4 @@ volumes:
   neo4j:
   qdrant:
   kafka:
+  eval_reports:
