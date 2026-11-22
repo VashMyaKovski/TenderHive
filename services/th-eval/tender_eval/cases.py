@@ -22,6 +22,17 @@ type Confidence = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False, strict
 type Percent = Annotated[Decimal, Field(ge=0, le=100, max_digits=10, decimal_places=6)]
 type SourceIndex = Annotated[int, Field(ge=1, le=12, strict=True)]
 type Version = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,199}$")]
+type GatewayErrorCode = Literal[
+    "invalid_request",
+    "invalid_context",
+    "unsafe_context",
+    "unsupported_prompt_version",
+    "provider_rejected",
+    "provider_unavailable",
+    "provider_timeout",
+    "invalid_provider_response",
+    "task_disabled",
+]
 
 
 class Contract(BaseModel):
@@ -57,23 +68,14 @@ class RiskExpectation(Contract):
 class ErrorExpectation(Contract):
     kind: Literal["error"]
     status: Literal[422, 502, 503, 504]
-    code: Literal[
-        "invalid_request",
-        "invalid_context",
-        "unsafe_context",
-        "unsupported_prompt_version",
-        "provider_rejected",
-        "provider_unavailable",
-        "provider_timeout",
-        "invalid_provider_response",
-    ]
+    code: GatewayErrorCode
 
     @model_validator(mode="after")
     def validate_status(self) -> Self:
         match self.code:
             case "provider_rejected" | "invalid_provider_response":
                 status = 502
-            case "provider_unavailable":
+            case "provider_unavailable" | "task_disabled":
                 status = 503
             case "provider_timeout":
                 status = 504
@@ -101,7 +103,7 @@ class EvalCase(Contract):
             raise ValueError("risk and live scenarios require masking")
         if isinstance(self.expected, RiskExpectation):
             if any(source > len(texts) for source in self.expected.source_ids):
-                raise ValueError("ethalon source is outside the context")
+                raise ValueError("expected source is outside the context")
             threshold_exceeded = penalty.daily_percent > knowledge.penalty_daily_threshold_percent
             if self.expected.threshold_exceeded != threshold_exceeded:
                 raise ValueError("expected threshold does not match the input")
