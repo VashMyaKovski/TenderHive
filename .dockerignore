@@ -1,0 +1,13 @@
+.git
+.github
+AGENTS.md
+context
+**/.env
+**/.env.*
+**/.envrc
+**/.venv
+**/venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache

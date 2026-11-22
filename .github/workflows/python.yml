@@ -1,0 +1,50 @@
+name: Development checks
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: .python-version
+      - run: python -m pip install uv==0.13.8
+      - run: uv sync --locked
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked pyright
+      - run: uv run --locked pytest
+
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose --env-file .env.example --profile monitoring --profile setup config --quiet
+      - run: docker compose --env-file .env.example --profile monitoring up --wait --wait-timeout 180
+      - run: docker compose --env-file .env.example run --rm kafka-init
+      - name: Check monitoring endpoints
+        run: |
+          curl --fail --silent --show-error --retry 12 --retry-connrefused \
+            --header 'Content-Type: application/json' --data '{"resourceMetrics":[]}' \
+            http://127.0.0.1:4318/v1/metrics
+          curl --fail --silent --show-error --retry 12 --retry-connrefused http://127.0.0.1:9090/-/ready
+          curl --fail --silent --show-error --retry 12 --retry-connrefused http://127.0.0.1:3000/api/health
+      - name: Print container logs on failure
+        if: failure()
+        run: docker compose --env-file .env.example --profile monitoring logs --no-color
+      - name: Stop the stack
+        if: always()
+        run: docker compose --env-file .env.example --profile monitoring down
