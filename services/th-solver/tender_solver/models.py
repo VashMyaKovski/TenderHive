@@ -19,9 +19,9 @@ class Fact(Contract):
 
 
 class KnowledgeFact(Contract):
-    fact_id: UUID
+    fact_id: NonEmpty
     key: NonEmpty | None = None
-    value: Scalar
+    value: JsonValue
     source: NonEmpty
     valid_from: date | None = None
     valid_until: date | None = None

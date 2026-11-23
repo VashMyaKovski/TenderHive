@@ -1,8 +1,8 @@
 from collections import defaultdict
-from decimal import Decimal, InvalidOperation
-from operator import eq, ge, gt, le, lt, ne
+from decimal import Decimal
+from operator import ge, gt, le, lt
 from typing import cast
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from contracts.models import (
     Compliance,
@@ -20,21 +20,25 @@ from pydantic import JsonValue, ValidationError
 
 from tender_solver.models import Condition, Consequence, Fact, KnowledgeFact, Scalar, SolveRequest
 
-_COMPARISONS = {"eq": eq, "ne": ne, "gt": gt, "gte": ge, "lt": lt, "lte": le}
+_COMPARISONS = {"gt": gt, "gte": ge, "lt": lt, "lte": le}
+
+
+def _same(left: Scalar, right: Scalar) -> bool:
+    comparable = type(left) is type(right) or (
+        type(left) in (int, float) and type(right) in (int, float)
+    )
+    return comparable and left == right
 
 
 def _matches(actual: Scalar, condition: Condition) -> bool:
     expected = condition.value
-    compare = _COMPARISONS[condition.op]
-    if condition.op in {"eq", "ne"} and (type(actual) is type(expected) or actual is None):
-        return compare(actual, expected)
-    if actual is None or expected is None or isinstance(actual, bool) or isinstance(expected, bool):
+    if condition.op in {"eq", "ne"}:
+        return _same(actual, expected) == (condition.op == "eq")
+    if not isinstance(actual, int | float) or not isinstance(expected, int | float):
         return False
-    try:
-        left, right = Decimal(str(actual)), Decimal(str(expected))
-        return left.is_finite() and right.is_finite() and compare(left, right)
-    except InvalidOperation:
+    if isinstance(actual, bool) or isinstance(expected, bool):
         return False
+    return _COMPARISONS[condition.op](actual, expected)
 
 
 def solve(
@@ -43,14 +47,22 @@ def solve(
     reasons: set[StopReason] = set()
     trace: list[JsonValue] = []
     facts: dict[str, list[Fact]] = defaultdict(list)
+    knowledge_ids: dict[UUID, str] = {}
     for raw in cast(list[JsonValue], context.get("facts", [])):
         try:
             item = KnowledgeFact.model_validate(raw)
         except ValidationError:
             continue
+        if not isinstance(item.value, (str, int, float, bool)) and item.value is not None:
+            continue
+        try:
+            fact_uuid = UUID(item.fact_id)
+        except ValueError:
+            fact_uuid = uuid5(NAMESPACE_URL, f"tenderhive:kb:{request.kb_version}:{item.fact_id}")
+        knowledge_ids[fact_uuid] = item.fact_id
         facts[item.key or str(item.fact_id)].append(
             Fact(
-                fact_id=item.fact_id,
+                fact_id=fact_uuid,
                 key=item.key or str(item.fact_id),
                 source=item.source,
                 value=item.value,
@@ -71,7 +83,7 @@ def solve(
                 )
             ):
                 continue
-            kind = str(scope.get("kind", "*"))
+            kind = str(scope.get("kind") or "*")
         else:
             kind = scope if isinstance(scope, str) else "*"
         rules[kind].append(raw)
@@ -88,7 +100,9 @@ def solve(
                 indeterminate = True
                 continue
             candidates = facts[condition.field]
-            if not candidates or len({fact.value for fact in candidates}) != 1:
+            if not candidates or any(
+                not _same(item.value, candidates[0].value) for item in candidates
+            ):
                 indeterminate = True
                 continue
             fact = candidates[0]
@@ -130,7 +144,14 @@ def solve(
                     reason=consequence.reason,
                 )
             )
-            trace.append({"rule_id": rule_id, "version": version, "source": fact.source})
+            entry: dict[str, JsonValue] = {
+                "rule_id": rule_id,
+                "version": version,
+                "source": fact.source,
+            }
+            if fact.fact_id in knowledge_ids:
+                entry["fact_id"] = knowledge_ids[fact.fact_id]
+            trace.append(entry)
 
     resources = [
         ResourceCheck(

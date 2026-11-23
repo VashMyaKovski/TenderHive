@@ -2,6 +2,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from pydantic import JsonValue
 
 from tender_solver.models import SolveRequest
 from tender_solver.rules import solve
@@ -98,3 +99,36 @@ def test_no_positions_has_no_solution(request_data: SolveRequest) -> None:
     result = solve(request_data, {"rules": [RULE]}, Decimal(10))
     assert result.status == "NO_SOLUTION"
     assert "NO_SOLUTION" in result.stop_reasons
+
+
+def test_regime_scope_and_stable_knowledge_fact_reference(request_data: SolveRequest) -> None:
+    request_data.facts.clear()
+    rule = {**RULE, "scope": {"kind": None, "regime": "commercial", "task_class": None}}
+    context: dict[str, JsonValue] = {
+        "rules": [rule],
+        "facts": [
+            {
+                "fact_id": "registry-experience",
+                "key": "experience",
+                "value": 6,
+                "source": "registry",
+            }
+        ],
+    }
+    result = solve(request_data, context, Decimal(10))
+    assert result.status == "READY"
+    assert result.compliance[0].fact_ref is not None
+    assert result.explanation.rule_trace == [
+        {"rule_id": "R-07", "version": 3, "source": "registry", "fact_id": "registry-experience"},
+    ]
+
+
+def test_number_and_numeric_string_do_not_match_same_condition(request_data: SolveRequest) -> None:
+    string_rule = {
+        **RULE,
+        "rule_id": "R-string",
+        "condition": {"field": "experience", "op": "eq", "value": "6"},
+        "consequence": {"status": "NOT_MET", "reason": "This value is a string."},
+    }
+    result = solve(request_data, {"rules": [RULE, string_rule]}, Decimal(10))
+    assert result.status == "READY"

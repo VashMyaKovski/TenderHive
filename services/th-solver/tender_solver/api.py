@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 from hashlib import sha256
 from hmac import compare_digest
 from typing import Annotated
@@ -93,8 +94,9 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
             ("task_class", body.profile.task_class),
         ]
         params.extend(("lot_ids", lot) for lot in body.lot_ids)
-        if body.as_of is not None:
-            params.append(("as_of", body.as_of.isoformat()))
+        as_of = body.as_of or datetime.now(UTC).date()
+        body = body.model_copy(update={"as_of": as_of})
+        params.append(("as_of", as_of.isoformat()))
         kinds = sorted({item.kind for item in body.requirements})
         if kinds:
             params.append(("query", " ".join(kinds)))
