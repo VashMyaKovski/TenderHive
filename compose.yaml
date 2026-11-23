@@ -1,3 +1,17 @@
+x-th-orchestrator: &th-orchestrator-settings
+  profiles: ["orchestrator"]
+  build:
+    context: .
+    dockerfile: services/th-orchestrator/Dockerfile
+  env_file:
+    - ./services/th-orchestrator/.env.example
+    - path: ./services/th-orchestrator/.env
+      required: false
+  environment:
+    TH_ORCHESTRATOR_DATABASE_NAME: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+    TH_ORCHESTRATOR_DATABASE_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+    TH_ORCHESTRATOR_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+
 services:
   postgres:
     image: postgres:17.9
@@ -91,6 +105,25 @@ services:
       test: ["CMD", "python", "-m", "tender_agents", "healthcheck"]
       interval: 5s
       timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  th-orchestrator-migrate:
+    <<: *th-orchestrator-settings
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  th-orchestrator:
+    <<: *th-orchestrator-settings
+    depends_on:
+      th-orchestrator-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "tender_orchestrator", "healthcheck"]
+      interval: 5s
+      timeout: 15s
       retries: 10
       start_period: 5s
 
