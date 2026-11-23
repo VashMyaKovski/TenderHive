@@ -164,7 +164,24 @@ def solve(
 
     risks: list[Risk] = []
     for result in request.agent_results:
+        trace.append(
+            {
+                "agent_role": result.agent_role,
+                "task_id": str(result.task_id),
+                "status": result.status,
+                "evidence": [item for item in result.evidence],
+            }
+        )
         if result.agent_role != "risk":
+            if result.status == "FAILED":
+                reasons.add("UNCLEAR_REQUIREMENTS")
+            elif result.status == "NEEDS_REVIEW":
+                if result.agent_role in {"resource", "supply"}:
+                    reasons.add("RESOURCE_GAP")
+                elif result.agent_role == "estimate":
+                    reasons.add("LOW_MARGIN")
+                else:
+                    reasons.add("UNCLEAR_REQUIREMENTS")
             continue
         if result.status == "FAILED":
             reasons.add("UNCLEAR_REQUIREMENTS")

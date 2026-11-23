@@ -3,12 +3,13 @@ from contextlib import asynccontextmanager, suppress
 from hashlib import sha256
 from hmac import compare_digest
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import psycopg
 from contracts.models import SolverResult
 from fastapi import FastAPI, Header, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from redis.asyncio import Redis
@@ -49,6 +50,14 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
             yield
 
     app = FastAPI(title="TenderHive solver", lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_input(request: Request, _: RequestValidationError) -> Response:
+        try:
+            trace_id = UUID(request.headers.get("X-Trace-Id", ""))
+        except ValueError:
+            trace_id = uuid4()
+        return _error(trace_id, 422, "INVALID_INPUT")
 
     @app.get("/healthz")
     async def health() -> Response:
