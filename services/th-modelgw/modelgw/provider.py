@@ -38,7 +38,7 @@ _JSON = TypeAdapter(JsonValue)
 _LOG = logging.getLogger("uvicorn.error.modelgw")
 
 
-class Nvidia:
+class OpenAICompatibleProvider:
     def __init__(
         self,
         client: httpx.AsyncClient,
@@ -47,6 +47,7 @@ class Nvidia:
         retry_delay: float,
         max_completion_tokens: int,
         embedding_input_type: Literal["query", "passage"] | None,
+        request_json_output: bool,
     ) -> None:
         self._client = client
         self._timeout = timeout
@@ -54,6 +55,7 @@ class Nvidia:
         self._retry_delay = retry_delay
         self._max_completion_tokens = max_completion_tokens
         self._embedding_input_type = embedding_input_type
+        self._request_json_output = request_json_output
 
     async def infer(self, call: ModelCall) -> tuple[str, JsonValue]:
         if call.task == "embeddings":
@@ -77,15 +79,15 @@ class Nvidia:
             {"role": "system", "content": call.prompt},
             {"role": "user", "content": user_parts if call.image_url else evidence},
         ]
-        response = await self._post(
-            "chat/completions",
-            {
-                "model": call.model,
-                "messages": messages,
-                "max_tokens": self._max_completion_tokens,
-                "stream": False,
-            },
-        )
+        payload = {
+            "model": call.model,
+            "messages": messages,
+            "max_tokens": self._max_completion_tokens,
+            "stream": False,
+        }
+        if self._request_json_output:
+            payload["response_format"] = {"type": "json_object"}
+        response = await self._post("chat/completions", payload)
         return self._completion(response)
 
     async def _post(self, path: str, payload: dict[str, JsonValue]) -> bytes:
