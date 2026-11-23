@@ -1,0 +1,21 @@
+services:
+  th-agents:
+    environment:
+      TH_AGENTS_MODEL_GATEWAY_URL: http://th-agents-gateway-stub:8000
+    depends_on:
+      th-agents-gateway-stub:
+        condition: service_healthy
+
+  th-agents-gateway-stub:
+    profiles: ["agents"]
+    build:
+      context: .
+      dockerfile: services/th-agents/Dockerfile
+      target: test
+    entrypoint: ["python", "-m", "uvicorn", "tests.gateway_stub:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    command: []
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/healthz', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
