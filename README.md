@@ -24,6 +24,8 @@ docker compose ps
 
 Контролируемый регрессионный прогон `th-eval` запускается командой `docker compose --env-file .env.example run --build --rm th-eval`. Настройки live-прогона, формат отчётов и сравнение версий описаны в [документации модуля](services/th-eval/README.md).
 
+Пример вызова `th-agents` через A2A оценивает условие о пене из опубликованной закупки. Команды для тестового и модельного шлюза приведены в [документации агента](services/th-agents/README.md).
+
 | Компонент | Адрес с хоста по умолчанию | Адрес внутри Compose |
 | --- | --- | --- |
 | PostgreSQL | `127.0.0.1:5432` | `postgres:5432` |
@@ -35,7 +37,7 @@ docker compose ps
 
 Для локального мониторинга запустите `docker compose --profile monitoring up --wait`. OpenTelemetry Collector принимает метрики по OTLP/gRPC на `127.0.0.1:4317` и OTLP/HTTP на `127.0.0.1:4318`. Prometheus доступен на `http://127.0.0.1:9090`, Grafana с настроенным источником Prometheus — на `http://127.0.0.1:3000`. Учётные данные Grafana задаются в `.env`. Инструментирование приложений и хранение трассировок добавляются вместе с сервисами.
 
-Остановить стек можно командой `docker compose --profile monitoring --profile modelgw --profile eval down`. Именованные тома PostgreSQL, Neo4j, Qdrant, Kafka и отчётов `th-eval` сохраняются.
+Остановить стек можно командой `docker compose --profile monitoring --profile modelgw --profile eval --profile agents down`. Именованные тома PostgreSQL, Neo4j, Qdrant, Kafka и отчётов `th-eval` сохраняются.
 
 ## Проверки
 
@@ -44,5 +46,5 @@ uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked pyright
 uv run --locked pytest
-docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval config --quiet
+docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval --profile agents config --quiet
 ```

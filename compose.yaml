@@ -78,6 +78,22 @@ services:
       retries: 10
       start_period: 5s
 
+  th-agents:
+    profiles: ["agents"]
+    build:
+      context: .
+      dockerfile: services/th-agents/Dockerfile
+    env_file:
+      - ./services/th-agents/.env.example
+      - path: ./services/th-agents/.env
+        required: false
+    healthcheck:
+      test: ["CMD", "python", "-m", "tender_agents", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   kafka:
     image: apache/kafka:4.1.2
     environment:

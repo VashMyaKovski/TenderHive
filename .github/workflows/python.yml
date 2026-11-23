@@ -42,13 +42,21 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked pyright
           uv run --locked pytest
+      - name: Check the risk agent
+        working-directory: services/th-agents
+        run: |
+          uv sync --locked
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked pyright
+          uv run --locked pytest
 
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - run: docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval config --quiet
+      - run: docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval --profile agents config --quiet
       - run: docker compose --env-file .env.example run --build --rm th-eval
       - run: docker compose --env-file .env.example --profile monitoring up --wait --wait-timeout 180
       - run: docker compose --env-file .env.example run --rm kafka-init
@@ -77,3 +85,24 @@ jobs:
       - name: Stop the stack
         if: always()
         run: docker compose --env-file .env.example --profile monitoring --profile modelgw --profile eval down
+
+  risk-agent-compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      COMPOSE_FILE: compose.yaml:services/th-agents/tests/compose.yaml
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose --env-file .env.example --profile agents config --quiet
+      - run: docker compose --env-file .env.example up --build --wait --wait-timeout 120 th-agents
+      - name: Assess a public procurement clause through A2A
+        run: >-
+          docker compose --env-file .env.example run --rm --no-deps --entrypoint python th-agents
+          -m tender_agents.demo examples/minsk-supply-risk.json
+          --url http://th-agents:8000 --timeout 20 --expect-reason penalty_above_threshold
+      - name: Print container logs on failure
+        if: failure()
+        run: docker compose --env-file .env.example --profile agents logs --no-color
+      - name: Stop the stack
+        if: always()
+        run: docker compose --env-file .env.example --profile agents down
