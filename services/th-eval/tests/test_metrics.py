@@ -101,6 +101,14 @@ def test_repeat_agreement_ignores_trace_ids_and_timings() -> None:
     assert summarize((first, second), 2).repeat_agreement == 1
 
 
+def test_repeat_agreement_is_unavailable_without_a_gateway_result() -> None:
+    first = observation("low", None, 0.9, 10)
+    second = first.model_copy(update={"latency_ms": 20, "repeat": 2})
+    summary = summarize((first, second), 2)
+    assert summary.repeat_agreement is None
+    assert summary.repeated_cases == 0
+
+
 def test_report_and_compare(tmp_path: Path) -> None:
     result = observation("low", "low", 0.4, 10)
     run = manifest((result.case_id,))

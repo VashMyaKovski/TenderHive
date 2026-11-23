@@ -11,7 +11,7 @@
 {"case_id":"2aa2ec99-e3cd-4330-993f-000000000010","status":422,"response":{"code":"invalid_request"}}
 {"case_id":"2aa2ec99-e3cd-4330-993f-000000000011","status":422,"response":{"code":"invalid_context"}}
 {"case_id":"2aa2ec99-e3cd-4330-993f-000000000012","status":422,"response":{"code":"unsafe_context"}}
-{"case_id":"2aa2ec99-e3cd-4330-993f-000000000013","status":502,"response":{"code":"provider_rejected"}}
-{"case_id":"2aa2ec99-e3cd-4330-993f-000000000014","status":504,"response":{"code":"provider_timeout"}}
-{"case_id":"2aa2ec99-e3cd-4330-993f-000000000015","status":503,"response":{"code":"provider_unavailable"}}
-{"case_id":"2aa2ec99-e3cd-4330-993f-000000000016","status":502,"response":{"code":"invalid_provider_response"}}
+{"case_id":"2aa2ec99-e3cd-4330-993f-000000000013","status":502,"response":{"status":"UNAVAILABLE","reason":"auth"}}
+{"case_id":"2aa2ec99-e3cd-4330-993f-000000000014","status":504,"response":{"status":"UNAVAILABLE","reason":"timeout"}}
+{"case_id":"2aa2ec99-e3cd-4330-993f-000000000015","status":503,"response":{"status":"UNAVAILABLE","reason":"unavailable"}}
+{"case_id":"2aa2ec99-e3cd-4330-993f-000000000016","status":502,"response":{"status":"UNAVAILABLE","reason":"schema_mismatch"}}

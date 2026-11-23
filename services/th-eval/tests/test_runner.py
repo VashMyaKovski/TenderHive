@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,8 @@ async def test_reference_run_through_http_transport() -> None:
     assert observations[6].prediction.effective_confidence == 0
     assert observations[13].error == "provider_timeout"
     assert observations[13].fault is None
+    assert observations[13].unavailable_reason == "timeout"
+    assert observations[6].cached is False
 
 
 async def test_returns_timeout_and_rejects_error_with_cached_answer() -> None:
@@ -37,7 +40,18 @@ async def test_returns_timeout_and_rejects_error_with_cached_answer() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if str(dataset.cases[0].case_id).encode() in request.content:
             await asyncio.sleep(1)
-        return httpx.Response(502, json={"code": "provider_rejected", "answer": {"cached": True}})
+        body = json.loads(request.content)
+        return httpx.Response(
+            502,
+            headers={"X-Trace-Id": body["trace_id"]},
+            json={
+                "job_id": body["job_id"],
+                "trace_id": body["trace_id"],
+                "status": "UNAVAILABLE",
+                "reason": "auth",
+                "answer": {"cached": True},
+            },
+        )
 
     async with httpx.AsyncClient(
         base_url="http://stub.invalid", transport=httpx.MockTransport(handler)

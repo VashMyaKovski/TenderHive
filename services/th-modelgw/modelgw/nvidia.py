@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Literal
 
 import httpx
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
@@ -37,7 +38,7 @@ _JSON = TypeAdapter(JsonValue)
 _LOG = logging.getLogger("uvicorn.error.modelgw")
 
 
-class OpenRouter:
+class Nvidia:
     def __init__(
         self,
         client: httpx.AsyncClient,
@@ -45,28 +46,25 @@ class OpenRouter:
         max_retries: int,
         retry_delay: float,
         max_completion_tokens: int,
-        synthetic_provider_collection: bool,
+        embedding_input_type: Literal["query", "passage"] | None,
     ) -> None:
         self._client = client
         self._timeout = timeout
         self._max_retries = max_retries
         self._retry_delay = retry_delay
         self._max_completion_tokens = max_completion_tokens
-        self._synthetic_provider_collection = synthetic_provider_collection
+        self._embedding_input_type = embedding_input_type
 
     async def infer(self, call: ModelCall) -> tuple[str, JsonValue]:
-        collection = "allow" if call.synthetic and self._synthetic_provider_collection else "deny"
         if call.task == "embeddings":
-            response = await self._post(
-                "embeddings",
-                {
-                    "model": call.model,
-                    "input": list(call.texts),
-                    "encoding_format": "float",
-                    "provider": {"data_collection": collection},
-                },
-            )
-            return self._embeddings(response)
+            payload: dict[str, JsonValue] = {
+                "model": call.model,
+                "input": list(call.texts),
+                "encoding_format": "float",
+            }
+            if self._embedding_input_type is not None:
+                payload["input_type"] = self._embedding_input_type
+            return self._embeddings(await self._post("embeddings", payload))
 
         sources: list[JsonValue] = [
             {"source_id": index, "text": text} for index, text in enumerate(call.texts, 1)
@@ -84,9 +82,8 @@ class OpenRouter:
             {
                 "model": call.model,
                 "messages": messages,
-                "response_format": {"type": "json_object"},
                 "max_tokens": self._max_completion_tokens,
-                "provider": {"data_collection": collection, "require_parameters": True},
+                "stream": False,
             },
         )
         return self._completion(response)
@@ -101,16 +98,16 @@ class OpenRouter:
             except httpx.TransportError:
                 failure = Failure.PROVIDER_UNAVAILABLE
             else:
-                if response.is_success:
+                if response.status_code == 200:
                     return response.content
                 _LOG.info("model_provider operation=%s http_status=%d", path, response.status_code)
-                if response.status_code not in {408, 429} and not response.is_server_error:
+                if response.status_code in {401, 403}:
+                    raise GatewayError(Failure.PROVIDER_AUTH)
+                if response.status_code not in {202, 408, 429} and not response.is_server_error:
                     raise GatewayError(Failure.PROVIDER_REJECTED)
-                failure = (
-                    Failure.PROVIDER_TIMEOUT
-                    if response.status_code == 408
-                    else Failure.PROVIDER_UNAVAILABLE
-                )
+                if response.status_code == 202:
+                    raise GatewayError(Failure.PROVIDER_TIMEOUT)
+                failure = _RETRYABLE_STATUS.get(response.status_code, Failure.PROVIDER_UNAVAILABLE)
 
             if attempt == self._max_retries:
                 raise GatewayError(failure)
@@ -139,3 +136,10 @@ class OpenRouter:
             raise GatewayError(Failure.INVALID_PROVIDER_RESPONSE)
         vectors: list[JsonValue] = [list(chunk.embedding) for chunk in chunks]
         return result.model, {"vectors": vectors}
+
+
+_RETRYABLE_STATUS = {
+    408: Failure.PROVIDER_TIMEOUT,
+    429: Failure.RATE_LIMIT,
+    504: Failure.PROVIDER_TIMEOUT,
+}

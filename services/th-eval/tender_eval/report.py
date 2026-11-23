@@ -133,24 +133,43 @@ def read_report(path: Path) -> MetricReport:
         raise DatasetError("cannot read a valid version 1 evaluation report") from None
 
 
-def compare_reports(baseline: MetricReport, candidate: MetricReport) -> dict[str, object]:
-    def comparable(report: MetricReport) -> tuple[object, ...]:
-        run = report.run
-        return (
-            run.mode,
-            run.dataset_sha256,
-            run.fixture_sha256,
-            run.case_ids,
-            run.cache_profile,
-            run.repeats,
-            run.concurrency,
-            run.timeout_seconds,
-            run.ece_buckets,
-            report.observed_rules,
-        )
+def _measurement_settings(report: MetricReport) -> tuple[object, ...]:
+    run = report.run
+    return (
+        run.mode,
+        run.case_ids,
+        run.cache_profile,
+        run.repeats,
+        run.concurrency,
+        run.timeout_seconds,
+        run.ece_buckets,
+    )
 
-    if comparable(baseline) != comparable(candidate):
+
+def compare_reports(baseline: MetricReport, candidate: MetricReport) -> dict[str, object]:
+    if (
+        _measurement_settings(baseline) != _measurement_settings(candidate)
+        or baseline.run.dataset_sha256 != candidate.run.dataset_sha256
+        or baseline.run.fixture_sha256 != candidate.run.fixture_sha256
+        or baseline.observed_rules != candidate.observed_rules
+    ):
         raise DatasetError("reports must use equal data, rules, mode and measurement settings")
+    return _report_delta(baseline, candidate)
+
+
+def compare_knowledge_reports(baseline: MetricReport, candidate: MetricReport) -> dict[str, object]:
+    if (
+        baseline.run.mode != "live"
+        or _measurement_settings(baseline) != _measurement_settings(candidate)
+        or baseline.observed_models != candidate.observed_models
+        or baseline.observed_prompts != candidate.observed_prompts
+        or baseline.run.prompt_version != candidate.run.prompt_version
+    ):
+        raise DatasetError("knowledge comparison requires live runs with matching model and prompt")
+    return _report_delta(baseline, candidate)
+
+
+def _report_delta(baseline: MetricReport, candidate: MetricReport) -> dict[str, object]:
     if len(baseline.observed_models) != 1 or len(candidate.observed_models) != 1:
         raise DatasetError("comparison requires one observed model per run")
     before, after = baseline.aggregate, candidate.aggregate
