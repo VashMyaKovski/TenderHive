@@ -1,0 +1,1 @@
+"""TenderHive knowledge base service."""
