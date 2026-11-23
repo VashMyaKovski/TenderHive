@@ -1,0 +1,243 @@
+{
+  "uid": "tenderhive-th-eval",
+  "title": "TenderHive Model Evaluation",
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": [
+    "tenderhive",
+    "evaluation"
+  ],
+  "refresh": "30s",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "type": "custom",
+        "name": "mode",
+        "label": "Run mode",
+        "query": "fixture,live",
+        "options": [
+          {
+            "text": "fixture",
+            "value": "fixture",
+            "selected": true
+          },
+          {
+            "text": "live",
+            "value": "live",
+            "selected": false
+          }
+        ],
+        "current": {
+          "text": "fixture",
+          "value": "fixture"
+        }
+      },
+      {
+        "type": "custom",
+        "name": "cache_profile",
+        "label": "Cache profile",
+        "query": "not_applicable,isolated_cold,warm,unverified",
+        "options": [
+          {
+            "text": "not_applicable",
+            "value": "not_applicable",
+            "selected": true
+          },
+          {
+            "text": "isolated_cold",
+            "value": "isolated_cold",
+            "selected": false
+          },
+          {
+            "text": "warm",
+            "value": "warm",
+            "selected": false
+          },
+          {
+            "text": "unverified",
+            "value": "unverified",
+            "selected": false
+          }
+        ],
+        "current": {
+          "text": "not_applicable",
+          "value": "not_applicable"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Risk classification and calibration",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tenderhive-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "th_eval_risk_macro_f1{stratum=\"all\",run_mode=\"$mode\",cache_profile=\"$cache_profile\"}",
+          "legendFormat": "Macro F1",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "th_eval_ece{stratum=\"all\",run_mode=\"$mode\",cache_profile=\"$cache_profile\"}",
+          "legendFormat": "ECE",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Gateway request latency",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tenderhive-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "th_eval_gateway_latency_p50_seconds{stratum=\"all\",run_mode=\"$mode\",cache_profile=\"$cache_profile\"}",
+          "legendFormat": "p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "th_eval_gateway_latency_p95_seconds{stratum=\"all\",run_mode=\"$mode\",cache_profile=\"$cache_profile\"}",
+          "legendFormat": "p95",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Trace ID coverage",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tenderhive-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "th_eval_trace_id_coverage{stratum=\"all\",run_mode=\"$mode\",cache_profile=\"$cache_profile\"}",
+          "legendFormat": "Responses with trace ID",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Regressions and upstream errors",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tenderhive-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "th_eval_case_attempts{stratum=\"all\",run_mode=\"$mode\",cache_profile=\"$cache_profile\"}",
+          "legendFormat": "Attempts",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "th_eval_case_failures{stratum=\"all\",run_mode=\"$mode\",cache_profile=\"$cache_profile\"}",
+          "legendFormat": "Failed assertions",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "th_eval_unexpected_errors{stratum=\"all\",run_mode=\"$mode\",cache_profile=\"$cache_profile\"}",
+          "legendFormat": "Unexpected errors",
+          "range": true
+        }
+      ]
+    }
+  ]
+}
