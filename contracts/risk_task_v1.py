@@ -14,7 +14,14 @@ type Text = Annotated[
 type Confidence = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False, strict=True)]
 type Percent = Annotated[Decimal, Field(ge=0, le=100, max_digits=10, decimal_places=6)]
 type RiskLevel = Literal["low", "medium", "high"]
-type HumanReason = Literal["penalty_above_threshold", "unclear_requirements"]
+type HumanReason = Literal[
+    "penalty_above_threshold",
+    "unclear_requirements",
+    "low_margin",
+    "resource_gap",
+    "no_solution",
+    "final_approval",
+]
 type FailureCode = Literal[
     "invalid_request",
     "invalid_context",

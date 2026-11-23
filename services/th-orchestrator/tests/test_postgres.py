@@ -16,13 +16,24 @@ from tender_orchestrator.api import create_app
 from tender_orchestrator.application import Orchestrator
 from tender_orchestrator.config import ReviewerCredential, Settings
 from tender_orchestrator.db import Database, JobStore, connection_info
-from tender_orchestrator.models import Clock, DecisionRequest, JobView, Reviewer, Role, StartJob
+from tender_orchestrator.models import (
+    Clock,
+    DecisionRequest,
+    JobView,
+    Reviewer,
+    ReviewPoint,
+    ReviewStep,
+    Role,
+    StartJob,
+)
 from tender_orchestrator.ports import RiskAgent, agent_error
 from tests.demo import JOBS_PATH, bearer
 
 LAWYER = "local-orchestrator-lawyer-token"
 LEAD = "local-orchestrator-leader-token"
 OUTSIDE = "local-orchestrator-external-lawyer"
+SUPPLY = "local-orchestrator-supply-token"
+TENDER = "local-orchestrator-tender-token"
 
 
 @pytest.fixture
@@ -419,3 +430,82 @@ async def test_recovery_after_decision_commit_before_resume(
             mode="json"
         )
     assert agent.calls == 1
+
+
+def with_reviews(request_body: StartJob, *reasons: str) -> StartJob:
+    return request_body.model_copy(
+        update={"reviews": [ReviewPoint(reason_code=reason) for reason in reasons]}  # type: ignore[arg-type]
+    )
+
+
+def card_for(job: JobView, step: ReviewStep):
+    return next(card for card in job.cards if card.step == step)
+
+
+async def decide_card(
+    api: API, job: JobView, token: str, step: ReviewStep, action: str = "continue"
+) -> JobView:
+    card = card_for(job, step)
+    response = await api.http.post(
+        f"{JOBS_PATH}/{job.job.job_id}/cards/{card.card_id}/decision",
+        headers=bearer(token),
+        json={"decision_id": str(uuid4()), "action": action, "comment": "Reviewed"},
+    )
+    assert response.status_code == 200, response.text
+    return JobView.model_validate(response.json())
+
+
+async def test_four_additional_hitl_points_run_in_order(
+    settings: Settings, request_body: StartJob
+) -> None:
+    agent = StubAgent(None)
+    body = with_reviews(request_body, "low_margin", "resource_gap", "no_solution", "final_approval")
+    async with running(settings, ManualClock(), agent) as api:
+        job = await api.start(body)
+        assert job.phase == "awaiting_review"
+        assert [card.step for card in job.cards] == ["margin_review"]
+        assert job.cards[0].role == "руководитель подразделения"
+
+        job = await decide_card(api, job, LEAD, "margin_review")
+        assert [card.step for card in job.cards if card.state == "open"] == ["resource_review"]
+        assert card_for(job, "resource_review").role == "служба снабжения"
+
+        job = await decide_card(api, job, SUPPLY, "resource_review")
+        assert [card.step for card in job.cards if card.state == "open"] == ["no_solution_review"]
+
+        job = await decide_card(api, job, LEAD, "no_solution_review")
+        assert [card.step for card in job.cards if card.state == "open"] == [
+            "final_approval_review"
+        ]
+
+        job = await decide_card(api, job, TENDER, "final_approval_review")
+        assert job.phase == "ready_for_next_stage"
+        assert all(card.state == "decided" for card in job.cards)
+
+
+async def test_stop_on_additional_point_declins_job(
+    settings: Settings, request_body: StartJob
+) -> None:
+    async with running(settings, ManualClock(), StubAgent(None)) as api:
+        job = await api.start(with_reviews(request_body, "low_margin"))
+        response = await api.http.post(
+            f"{JOBS_PATH}/{job.job.job_id}/cards/{card_for(job, 'margin_review').card_id}/decision",
+            headers=bearer(LEAD),
+            json={"decision_id": str(uuid4()), "action": "stop", "comment": "Margin too low"},
+        )
+        assert response.status_code == 200
+        assert JobView.model_validate(response.json()).phase == "declined"
+
+
+async def test_additional_point_timeout_escalates_to_leader(
+    settings: Settings, request_body: StartJob
+) -> None:
+    clock = ManualClock()
+    async with running(settings, clock, StubAgent(None)) as api:
+        job = await api.start(with_reviews(request_body, "resource_gap"))
+        clock.time += timedelta(seconds=settings.review_timeout_seconds + 1)
+        await api.service.expire_due()
+        state = await api.wait_for(job.job.job_id, lambda item: len(item.cards) == 2)
+        assert [card.step for card in state.cards] == ["resource_review", "resource_escalation"]
+        assert state.cards[0].decision is not None and state.cards[0].decision.timeout
+        assert state.cards[1].role == "руководитель подразделения"

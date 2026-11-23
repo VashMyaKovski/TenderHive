@@ -5,7 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from tender_orchestrator.agent import AgentClient
-from tender_orchestrator.models import DecisionRequest, StartJob
+from tender_orchestrator.models import HITL_POINTS, DecisionRequest, StartJob
 from tender_orchestrator.ports import AgentError
 
 
@@ -13,6 +13,32 @@ from tender_orchestrator.ports import AgentError
 def test_start_validates_correlated_decimal_task(request_body: StartJob, field: str) -> None:
     payload = request_body.model_dump(mode="json")
     payload["risk"][field] = 0.15 if field == "penalty_daily_percent" else str(uuid4())
+    with pytest.raises(ValidationError):
+        StartJob.model_validate(payload)
+
+
+def test_all_six_hitl_points_have_a_step_and_role() -> None:
+    assert set(HITL_POINTS) == {
+        "penalty_above_threshold",
+        "unclear_requirements",
+        "low_margin",
+        "resource_gap",
+        "no_solution",
+        "final_approval",
+    }
+    assert all(step.endswith("review") and role for step, role in HITL_POINTS.values())
+
+
+def test_start_job_accepts_review_points(request_body: StartJob) -> None:
+    payload = request_body.model_dump(mode="json")
+    payload["reviews"] = [{"reason_code": "low_margin"}, {"reason_code": "final_approval"}]
+    parsed = StartJob.model_validate(payload)
+    assert [point.reason_code for point in parsed.reviews] == ["low_margin", "final_approval"]
+
+
+def test_duplicate_review_points_are_rejected(request_body: StartJob) -> None:
+    payload = request_body.model_dump(mode="json")
+    payload["reviews"] = [{"reason_code": "low_margin"}, {"reason_code": "low_margin"}]
     with pytest.raises(ValidationError):
         StartJob.model_validate(payload)
 
