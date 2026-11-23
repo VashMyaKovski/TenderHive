@@ -64,9 +64,13 @@ class RiskGraph:
         self._graph = builder.compile(checkpointer=saver)
 
     async def advance(self, store: JobRepository, job_id: UUID) -> None:
-        if not (await store.job(job_id)).needs_advance:
+        record = await store.job(job_id)
+        if not record.needs_advance or record.risk is None:
             return
-        config: RunnableConfig = {"configurable": {"thread_id": str(job_id)}}
+        thread_id = (
+            str(job_id) if record.risk_generation == 0 else f"{job_id}:{record.risk_generation}"
+        )
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
         context = GraphContext(store)
         snapshot = await self._graph.aget_state(config)
         decision = await store.recorded_decision(job_id)
@@ -95,13 +99,15 @@ class RiskGraph:
         if record.risk_result is not None:
             return {"route": "review" if record.risk_result.human_reason else "finish"}
         failure = record.failure
+        if record.risk is None:
+            raise RuntimeError("risk input has not been recorded")
         if failure is not None and not failure.retryable:
             return {"route": "fail"}
 
         for attempt in range(record.risk_attempts + 1, self._attempts + 1):
             await store.reserve_attempt(job_id)
             try:
-                result = await self._agent.assess(record.request.risk)
+                result = await self._agent.assess(record.risk)
             except AgentError as error:
                 await store.save_failure(job_id, error.failure)
                 _LOG.info(
@@ -159,9 +165,12 @@ class RiskGraph:
             decision = await store.recorded_decision(job_id)
             if decision is None or str(decision.decision_id) != state.get("decision_id"):
                 raise RuntimeError("review decision was not recorded")
-            await store.set_phase(
-                job_id, "declined" if decision.action == "stop" else "ready_for_next_stage"
-            )
+            if decision.action == "stop":
+                await store.set_phase(job_id, "declined")
+            elif decision.action == "needs_info":
+                await store.set_phase(job_id, "needs_clarification")
+            else:
+                await store.set_phase(job_id, "ready_for_next_stage")
         else:
             await store.set_phase(job_id, "ready_for_next_stage")
         return {}

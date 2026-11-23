@@ -63,7 +63,7 @@ async def run(
                     state = await client.get(job_path, headers=service)
                     job = JobView.model_validate(state.raise_for_status().json())
             assert job.phase == "awaiting_review" and len(job.cards) == 1
-            assert job.cards[0].reason_code == "penalty_above_threshold"
+            assert job.cards[0].reason_code == "PENALTY_ABOVE_THRESHOLD"
         else:
             response = await client.get(job_path, headers=service)
             response.raise_for_status()

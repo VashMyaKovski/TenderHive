@@ -5,7 +5,7 @@ ENV UV_LINK_MODE=copy PATH="/app/.venv/bin:$PATH"
 COPY services/th-agents/pyproject.toml services/th-agents/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
 COPY services/th-agents/tender_agents ./tender_agents
-COPY contracts/__init__.py contracts/risk_task_v1.py ./contracts/
+COPY contracts/__init__.py contracts/agent_task.py contracts/risk_task_v1.py ./contracts/
 COPY services/th-agents/examples ./examples
 
 FROM build AS test

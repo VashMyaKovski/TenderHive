@@ -28,7 +28,7 @@ def main() -> None:
     sdk_logs = logging.getLogger("a2a")
     sdk_logs.addHandler(logging.NullHandler())
     sdk_logs.propagate = False
-    uvicorn.run(create_app(settings, None), host=host, port=settings.port, access_log=False)
+    uvicorn.run(create_app(settings, None, None), host=host, port=settings.port, access_log=False)
 
 
 if __name__ == "__main__":
