@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from tender_integrations.adapters import parse_message
+from tender_integrations.adapters import LocalFileStore, parse_message
 from tender_integrations.config import Settings
 from tender_integrations.errors import ErrorCode, IntegrationError
 from tender_integrations.models import Attachment
@@ -87,3 +88,10 @@ async def test_failed_publish_releases_key_and_keeps_message_unseen(settings: Se
     with pytest.raises(IntegrationError):
         await processor.process(message())
     assert source.marked == []
+
+
+async def test_attachment_name_cannot_escape_storage(tmp_path: Path) -> None:
+    store = LocalFileStore(str(tmp_path))
+    document = await store.save(Attachment("../../evil.pdf", b"data", "application/pdf"), uuid4())
+    assert document.name == "evil.pdf"
+    assert Path(document.storage_path).parent.parent == tmp_path

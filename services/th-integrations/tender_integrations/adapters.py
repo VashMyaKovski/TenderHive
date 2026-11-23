@@ -121,11 +121,13 @@ class LocalFileStore:
     async def save(self, attachment: Attachment, job_id: UUID) -> StoredDocument:
         directory = self._root / str(job_id)
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / attachment.name
+        # Attachment names come from untrusted mail; never let them address a path.
+        safe_name = Path(attachment.name).name
+        path = directory / safe_name
         path.write_bytes(attachment.content)
         return StoredDocument(
             file_id=uuid4(),
-            name=attachment.name,
+            name=safe_name,
             mime=attachment.mime,
             checksum=hashlib.sha256(attachment.content).hexdigest(),
             storage_path=str(path),
