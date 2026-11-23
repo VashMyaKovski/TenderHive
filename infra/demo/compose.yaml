@@ -1,0 +1,23 @@
+services:
+  th-orchestrator:
+    environment:
+      TH_ORCHESTRATOR_ARTIFACT_TOKEN: replace-with-local-demo-token
+      TH_ORCHESTRATOR_ARTIFACT_MAX_BYTES: "2097152"
+    depends_on:
+      th-agents:
+        condition: service_healthy
+
+  th-kb:
+    environment:
+      KB_EMBEDDING_MODE: gateway
+      KB_VECTOR_SIZE: "1536"
+      KB_QDRANT_COLLECTION: th_kb_openrouter_demo
+
+  demo:
+    profiles: ["demo"]
+    build:
+      context: .
+      dockerfile: services/th-orchestrator/Dockerfile
+    env_file:
+      - infra/demo/.env.example
+    entrypoint: ["python", "-m", "tender_orchestrator.demo_flow"]

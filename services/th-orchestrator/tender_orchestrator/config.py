@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     reviewers: Annotated[list[ReviewerCredential], Field(min_length=1)]
     bind_host: IPvAnyAddress
     port: Port
+    artifact_token: Token | None = None
+    artifact_max_bytes: Annotated[int, Field(ge=1, le=104857600)] | None = None
 
     @field_validator("agent_url")
     @classmethod
@@ -66,6 +68,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_credentials(self) -> Settings:
+        if (self.artifact_token is None) != (self.artifact_max_bytes is None):
+            raise ValueError("artifact token and size limit must be configured together")
         tokens = [
             self.service_token.get_secret_value(),
             *(item.token.get_secret_value() for item in self.reviewers),
