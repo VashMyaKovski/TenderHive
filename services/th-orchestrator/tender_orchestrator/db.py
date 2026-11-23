@@ -280,7 +280,7 @@ class JobStore:
                     UPDATE review_cards SET state = 'decided', decision_id = %s, actor_id = %s,
                         action = %s, comment = %s, decided_at = %s, applied = false
                     WHERE job_id = %s AND card_id = %s AND state = 'open'
-                        AND (step LIKE '%escalation' OR deadline > %s)
+                        AND (step LIKE %s OR deadline > %s)
                     """,
                     (
                         request.decision_id,
@@ -290,6 +290,7 @@ class JobStore:
                         now,
                         job_id,
                         card_id,
+                        "%escalation",
                         now,
                     ),
                 )

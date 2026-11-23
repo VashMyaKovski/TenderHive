@@ -357,8 +357,10 @@ async def test_recovery_after_card_commit_before_interrupt(
         reason: HumanReason,
         role: Role,
         deadline: datetime,
+        *,
+        step: ReviewStep = "risk_review",
     ) -> None:
-        await original(self, job_id, reason, role, deadline)
+        await original(self, job_id, reason, role, deadline, step=step)
         if job_id == request_body.job.job_id:
             raise RuntimeError("simulate termination after the review card commit")
 
@@ -507,5 +509,7 @@ async def test_additional_point_timeout_escalates_to_leader(
         await api.service.expire_due()
         state = await api.wait_for(job.job.job_id, lambda item: len(item.cards) == 2)
         assert [card.step for card in state.cards] == ["resource_review", "resource_escalation"]
-        assert state.cards[0].decision is not None and state.cards[0].decision.timeout
+        assert state.cards[0].state == "timed_out" and state.cards[0].timeout
         assert state.cards[1].role == "руководитель подразделения"
+        decided = await decide_card(api, state, LEAD, "resource_escalation")
+        assert decided.cards[1].decision is not None and decided.cards[1].decision.timeout
