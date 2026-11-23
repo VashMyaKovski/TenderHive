@@ -1,0 +1,16 @@
+{
+  "kind": "risk_task.v1",
+  "task_id": "65f509c8-e87e-4a2e-a074-ec179d7fd323",
+  "job_id": "751da55e-033e-4ad7-9993-858d44d52eb1",
+  "fragment_id": "e64eedcc-fd13-4ae4-b3ac-d18f50b2425c",
+  "source": {
+    "url": "https://www.bicotender.ru/ximiia/zakupka-xoziaistvennyx-tovarov-minsk-tender341041674.html",
+    "locator": "Проект договора поставки, п. 6.2"
+  },
+  "fragment_text": "За нарушение срока поставки покупатель вправе взыскать ежедневную пеню от стоимости товара, не поставленного в срок.",
+  "fragment_type": "public_text",
+  "rules_version": "kb-demo-v1",
+  "penalty_daily_percent": "0.15",
+  "penalty_daily_threshold_percent": "0.10",
+  "prompt_version": "v1"
+}
