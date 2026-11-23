@@ -16,7 +16,18 @@ type Phase = Literal[
     "accepted", "assessing", "awaiting_review", "ready_for_next_stage", "declined", "failed"
 ]
 type CardState = Literal["open", "decided", "timed_out"]
-type ReviewStep = Literal["risk_review", "risk_escalation"]
+type ReviewStep = Literal[
+    "risk_review",
+    "risk_escalation",
+    "margin_review",
+    "margin_escalation",
+    "resource_review",
+    "resource_escalation",
+    "no_solution_review",
+    "no_solution_escalation",
+    "final_approval_review",
+    "final_approval_escalation",
+]
 type Action = Literal["continue", "stop"]
 type ErrorCode = Literal[
     "job_not_found", "card_not_found", "access_denied", "job_conflict", "decision_conflict"
@@ -24,6 +35,23 @@ type ErrorCode = Literal[
 type Profile = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 
 LEAD_ROLE: Role = "руководитель подразделения"
+
+# Each escalation point has its own card so a job can escalate more than once.
+HITL_POINTS: dict[HumanReason, tuple[ReviewStep, Role]] = {
+    "penalty_above_threshold": ("risk_review", "юрист"),
+    "unclear_requirements": ("risk_review", "тендерный специалист"),
+    "low_margin": ("margin_review", LEAD_ROLE),
+    "resource_gap": ("resource_review", "служба снабжения"),
+    "no_solution": ("no_solution_review", LEAD_ROLE),
+    "final_approval": ("final_approval_review", "тендерный специалист"),
+}
+ESCALATION_STEPS: dict[ReviewStep, ReviewStep] = {
+    "risk_review": "risk_escalation",
+    "margin_review": "margin_escalation",
+    "resource_review": "resource_escalation",
+    "no_solution_review": "no_solution_escalation",
+    "final_approval_review": "final_approval_escalation",
+}
 JOB_STATUS: dict[Phase, JobStatus] = {
     "accepted": "принято",
     "assessing": "обрабатывается",
@@ -40,9 +68,14 @@ class WorkflowError(Exception):
         self.code: ErrorCode = code
 
 
+class ReviewPoint(Contract):
+    reason_code: HumanReason
+
+
 class StartJob(Contract):
     job: Job
     risk: RiskTaskV1
+    reviews: list[ReviewPoint] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_risk_task(self) -> StartJob:
@@ -54,6 +87,9 @@ class StartJob(Contract):
             raise ValueError("job idempotency key must have between 1 and 200 characters")
         if not 1 <= len(self.job.profile_ref) <= 200:
             raise ValueError("job must reference a profile")
+        codes = [item.reason_code for item in self.reviews]
+        if len(codes) != len(set(codes)):
+            raise ValueError("review points must be unique")
         return self
 
 

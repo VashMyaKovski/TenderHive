@@ -11,17 +11,21 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
 
-from tender_orchestrator.models import Clock, Role
+from contracts.risk_task_v1 import HumanReason
+from tender_orchestrator.models import HITL_POINTS, Clock, ReviewStep, Role
 from tender_orchestrator.ports import AgentError, JobRepository, RiskAgent, agent_error
 
 _LOG = logging.getLogger("uvicorn.error.orchestrator")
 
-type Route = Literal["review", "finish", "fail"]
+type Route = Literal["review", "next", "finish", "fail", "declined"]
 
 
 class RiskState(TypedDict):
     job_id: str
     route: NotRequired[Route]
+    step: NotRequired[ReviewStep]
+    reason: NotRequired[HumanReason]
+    index: NotRequired[int]
     decision_id: NotRequired[str]
 
 
@@ -51,15 +55,25 @@ class RiskGraph:
 
         builder = StateGraph(RiskState, context_schema=GraphContext)
         builder.add_node("assess", self._assess)
+        builder.add_node("next_review", self._next_review)
         builder.add_node("open_review", self._open_review)
         builder.add_node("await_decision", self._await_decision)
+        builder.add_node("after_decision", self._after_decision)
         builder.add_node("finish", self._finish)
         builder.add_edge(START, "assess")
         builder.add_conditional_edges(
-            "assess", self._route, {"review": "open_review", "finish": "finish", "fail": "finish"}
+            "assess",
+            self._route,
+            {"review": "open_review", "next": "next_review", "fail": "finish"},
+        )
+        builder.add_conditional_edges(
+            "next_review", self._route, {"review": "open_review", "finish": "finish"}
         )
         builder.add_edge("open_review", "await_decision")
-        builder.add_edge("await_decision", "finish")
+        builder.add_edge("await_decision", "after_decision")
+        builder.add_conditional_edges(
+            "after_decision", self._route, {"next": "next_review", "declined": "finish"}
+        )
         builder.add_edge("finish", END)
         self._graph = builder.compile(checkpointer=saver)
 
@@ -86,16 +100,27 @@ class RiskGraph:
                 context=context,
                 durability="sync",
             )
+            await store.mark_decision_applied(decision.decision_id)
         await store.mark_advanced(job_id)
 
-    async def _assess(self, state: RiskState, runtime: Runtime[GraphContext]) -> dict[str, Route]:
+    @staticmethod
+    def _review(reason: HumanReason) -> dict[str, object]:
+        return {"route": "review", "step": HITL_POINTS[reason][0], "reason": reason}
+
+    async def _assess(self, state: RiskState, runtime: Runtime[GraphContext]) -> dict[str, object]:
         store = runtime.context.store
         job_id = UUID(state["job_id"])
         record = await store.job(job_id)
+        requested = {point.reason_code for point in record.request.reviews}
         if record.risk_result is not None:
-            return {"route": "review" if record.risk_result.human_reason else "finish"}
+            reason = record.risk_result.human_reason
+            if reason is not None:
+                return self._review(reason)
+            return {"route": "next", "index": 0}
         failure = record.failure
         if failure is not None and not failure.retryable:
+            if "no_solution" in requested:
+                return self._review("no_solution")
             return {"route": "fail"}
 
         for attempt in range(record.risk_attempts + 1, self._attempts + 1):
@@ -111,17 +136,38 @@ class RiskGraph:
                     error.failure.code,
                 )
                 if not error.failure.retryable or attempt == self._attempts:
+                    if "no_solution" in requested:
+                        return self._review("no_solution")
                     return {"route": "fail"}
                 await asyncio.sleep(self._retry_delay)
             else:
                 await store.save_result(job_id, result)
-                return {"route": "review" if result.human_reason else "finish"}
+                if result.human_reason is not None:
+                    return self._review(result.human_reason)
+                return {"route": "next", "index": 0}
 
         if failure is None:
             await store.save_failure(
                 job_id, agent_error("agent_attempt_interrupted", retryable=False).failure
             )
+        if "no_solution" in requested:
+            return self._review("no_solution")
         return {"route": "fail"}
+
+    async def _next_review(
+        self, state: RiskState, runtime: Runtime[GraphContext]
+    ) -> dict[str, object]:
+        record = await runtime.context.store.job(UUID(state["job_id"]))
+        index = state.get("index", 0)
+        if index >= len(record.request.reviews):
+            return {"route": "finish"}
+        reason = record.request.reviews[index].reason_code
+        return {
+            "route": "review",
+            "step": HITL_POINTS[reason][0],
+            "reason": reason,
+            "index": index + 1,
+        }
 
     @staticmethod
     def _route(state: RiskState) -> Route:
@@ -133,20 +179,34 @@ class RiskGraph:
     async def _open_review(
         self, state: RiskState, runtime: Runtime[GraphContext]
     ) -> dict[str, str]:
+        step = state.get("step")
+        reason = state.get("reason")
+        if step is None or reason is None:
+            raise RuntimeError("review point has no step or reason")
         job_id = UUID(state["job_id"])
-        record = await runtime.context.store.job(job_id)
-        risk = record.risk_result
-        if risk is None or risk.human_reason is None:
-            raise RuntimeError("risk assessment has no review reason")
-        await runtime.context.store.open_review(
-            job_id, risk.human_reason, self._role, self._clock().astimezone(UTC) + self._wait
-        )
+        role = self._role if step == "risk_review" else HITL_POINTS[reason][1]
+        deadline = self._clock().astimezone(UTC) + self._wait
+        await runtime.context.store.open_review(job_id, reason, role, deadline, step=step)
         return {}
 
     @staticmethod
     def _await_decision(state: RiskState) -> dict[str, str]:
-        decision_id = interrupt({"job_id": state["job_id"], "step": "risk_review"})
+        decision_id = interrupt(
+            {"job_id": state["job_id"], "step": state.get("step", "risk_review")}
+        )
         return {"decision_id": decision_id}
+
+    @staticmethod
+    async def _after_decision(state: RiskState, runtime: Runtime[GraphContext]) -> dict[str, Route]:
+        decision_id = state.get("decision_id")
+        if decision_id is None:
+            raise RuntimeError("review decision was not recorded")
+        decision = await runtime.context.store.decision_by_id(
+            UUID(state["job_id"]), UUID(decision_id)
+        )
+        if decision is None:
+            raise RuntimeError("review decision was not recorded")
+        return {"route": "declined" if decision.action == "stop" else "next"}
 
     @staticmethod
     async def _finish(state: RiskState, runtime: Runtime[GraphContext]) -> dict[str, str]:
@@ -155,13 +215,8 @@ class RiskGraph:
         route = RiskGraph._route(state)
         if route == "fail":
             await store.set_phase(job_id, "failed")
-        elif route == "review":
-            decision = await store.recorded_decision(job_id)
-            if decision is None or str(decision.decision_id) != state.get("decision_id"):
-                raise RuntimeError("review decision was not recorded")
-            await store.set_phase(
-                job_id, "declined" if decision.action == "stop" else "ready_for_next_stage"
-            )
+        elif route == "declined":
+            await store.set_phase(job_id, "declined")
         else:
             await store.set_phase(job_id, "ready_for_next_stage")
         return {}

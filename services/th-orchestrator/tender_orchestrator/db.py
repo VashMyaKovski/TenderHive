@@ -17,6 +17,7 @@ from contracts.models import HumanDecision
 from contracts.risk_task_v1 import HumanReason, RiskResultV1
 from tender_orchestrator.config import Settings
 from tender_orchestrator.models import (
+    ESCALATION_STEPS,
     JOB_STATUS,
     LEAD_ROLE,
     AssessmentFailure,
@@ -25,13 +26,14 @@ from tender_orchestrator.models import (
     Phase,
     ReviewCard,
     Reviewer,
+    ReviewStep,
     Role,
     StartJob,
     WorkflowError,
 )
 from tender_orchestrator.ports import JobRecord, RecordedDecision
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 def connection_info(settings: Settings) -> str:
@@ -187,14 +189,16 @@ class JobStore:
         reason: HumanReason,
         role: Role,
         deadline: datetime,
+        *,
+        step: ReviewStep = "risk_review",
     ) -> None:
         async with self._connection.transaction():
             await self._connection.execute(
                 """
                 INSERT INTO review_cards (card_id, job_id, step, reason_code, role, deadline)
-                VALUES (%s, %s, 'risk_review', %s, %s, %s) ON CONFLICT (job_id, step) DO NOTHING
+                VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (job_id, step) DO NOTHING
                 """,
-                (uuid4(), job_id, reason, role, deadline),
+                (uuid4(), job_id, step, reason, role, deadline),
             )
             await self.set_phase(job_id, "awaiting_review")
 
@@ -223,23 +227,32 @@ class JobStore:
 
     async def expire(self, job_id: UUID, now: datetime) -> None:
         async with self._connection.transaction():
-            card = await (
+            cards = await (
                 await self._connection.execute(
                     """
                 UPDATE review_cards SET state = 'timed_out'
-                WHERE job_id = %s AND step = 'risk_review' AND state = 'open' AND deadline <= %s
-                RETURNING reason_code, deadline
+                WHERE job_id = %s AND state = 'open' AND deadline <= %s
+                    AND step NOT LIKE %s
+                RETURNING step, reason_code, deadline
                 """,
-                    (job_id, now),
+                    (job_id, now, "%escalation"),
                 )
-            ).fetchone()
-            if card is not None:
+            ).fetchall()
+            for card in cards:
                 await self._connection.execute(
                     """
                     INSERT INTO review_cards (card_id, job_id, step, reason_code, role, deadline)
-                    VALUES (%s, %s, 'risk_escalation', %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (job_id, step) DO NOTHING
                     """,
-                    (uuid4(), job_id, card["reason_code"], LEAD_ROLE, card["deadline"]),
+                    (
+                        uuid4(),
+                        job_id,
+                        ESCALATION_STEPS[card["step"]],
+                        card["reason_code"],
+                        LEAD_ROLE,
+                        card["deadline"],
+                    ),
                 )
 
     async def record_decision(
@@ -265,17 +278,19 @@ class JobStore:
                 cursor = await self._connection.execute(
                     """
                     UPDATE review_cards SET state = 'decided', decision_id = %s, actor_id = %s,
-                        action = %s, comment = %s
+                        action = %s, comment = %s, decided_at = %s, applied = false
                     WHERE job_id = %s AND card_id = %s AND state = 'open'
-                        AND (step = 'risk_escalation' OR deadline > %s)
+                        AND (step LIKE %s OR deadline > %s)
                     """,
                     (
                         request.decision_id,
                         actor.actor_id,
                         request.action,
                         request.comment,
+                        now,
                         job_id,
                         card_id,
+                        "%escalation",
                         now,
                     ),
                 )
@@ -290,11 +305,32 @@ class JobStore:
     async def recorded_decision(self, job_id: UUID) -> RecordedDecision | None:
         row = await (
             await self._connection.execute(
-                "SELECT decision_id, action FROM review_cards WHERE job_id = %s AND state = 'decided'",
+                """
+                SELECT decision_id, action FROM review_cards
+                WHERE job_id = %s AND state = 'decided' AND NOT applied
+                ORDER BY decided_at, card_id LIMIT 1
+                """,
                 (job_id,),
             )
         ).fetchone()
         return RecordedDecision(row["decision_id"], row["action"]) if row is not None else None
+
+    async def decision_by_id(self, job_id: UUID, decision_id: UUID) -> RecordedDecision | None:
+        row = await (
+            await self._connection.execute(
+                """
+                SELECT decision_id, action FROM review_cards
+                WHERE job_id = %s AND decision_id = %s AND state = 'decided'
+                """,
+                (job_id, decision_id),
+            )
+        ).fetchone()
+        return RecordedDecision(row["decision_id"], row["action"]) if row is not None else None
+
+    async def mark_decision_applied(self, decision_id: UUID) -> None:
+        await self._connection.execute(
+            "UPDATE review_cards SET applied = true WHERE decision_id = %s", (decision_id,)
+        )
 
     async def pending_jobs(self, limit: int) -> list[UUID]:
         rows = await (
@@ -309,17 +345,17 @@ class JobStore:
         rows = await (
             await self._connection.execute(
                 """
-            SELECT job_id FROM review_cards WHERE step = 'risk_review' AND state = 'open'
-                AND deadline <= %s ORDER BY deadline, job_id LIMIT %s
+            SELECT job_id FROM review_cards WHERE state = 'open'
+                AND step NOT LIKE %s AND deadline <= %s ORDER BY deadline, job_id LIMIT %s
             """,
-                (now, limit),
+                ("%escalation", now, limit),
             )
         ).fetchall()
         return [row["job_id"] for row in rows]
 
 
 def _public_card(row: DictRow) -> ReviewCard:
-    expired = row["state"] == "timed_out" or row["step"] == "risk_escalation"
+    expired = row["state"] == "timed_out" or str(row["step"]).endswith("escalation")
     decision = None
     if row["decision_id"] is not None:
         decision = HumanDecision.model_validate(
