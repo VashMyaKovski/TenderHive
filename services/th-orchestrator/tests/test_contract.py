@@ -19,7 +19,7 @@ def test_start_validates_correlated_decimal_task(request_body: StartJob, field: 
 
 def test_stop_requires_a_review_comment() -> None:
     with pytest.raises(ValidationError):
-        DecisionRequest(decision_id=uuid4(), action="stop", comment="  ")
+        DecisionRequest(decision_id=uuid4(), decision="REJECTED", comment="  ")
 
 
 @pytest.mark.parametrize(("status", "retryable"), [(404, False), (429, True), (503, True)])

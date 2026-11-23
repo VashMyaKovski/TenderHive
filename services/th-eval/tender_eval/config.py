@@ -1,7 +1,9 @@
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
-from pydantic import Field, HttpUrl, field_validator
+from psycopg import ProgrammingError
+from psycopg.conninfo import conninfo_to_dict
+from pydantic import Field, HttpUrl, IPvAnyAddress, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tender_eval.cases import Version
@@ -50,3 +52,23 @@ class Settings(BaseSettings):
         if url.username or url.password or url.query or url.fragment or url.path not in {None, "/"}:
             raise ValueError("gateway URL must be an origin without credentials")
         return url
+
+
+class ApiSettings(Settings):
+    postgres_dsn: Annotated[SecretStr, Field(min_length=1)]
+    database_timeout_seconds: Annotated[int, Field(ge=2, le=120)]
+    bind_host: IPvAnyAddress
+    port: Annotated[int, Field(ge=1, le=65_535)]
+    api_mode: Literal["fixture", "live"]
+    kb_version: Version
+
+    @field_validator("postgres_dsn")
+    @classmethod
+    def validate_dsn(cls, dsn: SecretStr) -> SecretStr:
+        try:
+            parameters = conninfo_to_dict(dsn.get_secret_value())
+        except ProgrammingError:
+            raise ValueError("invalid PostgreSQL DSN") from None
+        if not all(parameters.get(field) for field in ("host", "port", "dbname", "user")):
+            raise ValueError("PostgreSQL DSN requires host, port, database and user")
+        return dsn

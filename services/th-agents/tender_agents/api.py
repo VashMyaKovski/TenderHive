@@ -26,10 +26,17 @@ from a2a.utils.errors import UnsupportedOperationError
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import Field, TypeAdapter, ValidationError
+from redis.asyncio import Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
+from redis.exceptions import RedisError
 
-from contracts.risk_task_v1 import RiskFailureV1, RiskResultV1, RiskTaskV1
+from contracts.agent_task import AgentResult, AgentTask, ModelCall
+from contracts.risk_task_v1 import RiskFailureV1, RiskInput, RiskResultV1, RiskTaskV1
+from tender_agents.assessment import RiskAssessment
 from tender_agents.config import Settings
 from tender_agents.gateway import GatewayFailure, ModelGateway
+from tender_agents.ledger import RedisRiskLedger, RiskLedger
 
 _LOG = logging.getLogger("uvicorn.error.risk_agent")
 _RPC_PATH = "/a2a"
@@ -44,6 +51,7 @@ _RPC_ERROR_MESSAGES = {
 _SCHEMA = TypeAdapter(
     Annotated[RiskTaskV1 | RiskResultV1 | RiskFailureV1, Field(discriminator="kind")]
 )
+_AGENT_SCHEMA = TypeAdapter(AgentTask | AgentResult)
 
 
 def _identifier(data: object, key: str) -> UUID | None:
@@ -56,9 +64,52 @@ def _identifier(data: object, key: str) -> UUID | None:
     return None
 
 
+def _risk_request(data: object, task: AgentTask | None) -> RiskTaskV1:
+    if task is None:
+        return RiskTaskV1.model_validate(data)
+    if task.agent_role != "risk":
+        raise GatewayFailure("role_unavailable", task.trace_id)
+    risk = RiskInput.model_validate(task.input)
+    return RiskTaskV1.model_validate(
+        {
+            **risk.model_dump(mode="json"),
+            "kind": "risk_task.v1",
+            "task_id": task.task_id,
+            "job_id": task.job_id,
+            "rules_version": task.kb_version,
+            "trace_id": task.trace_id,
+        }
+    )
+
+
+def _agent_result(task: AgentTask, result: RiskResultV1) -> AgentResult:
+    return AgentResult(
+        task_id=task.task_id,
+        job_id=task.job_id,
+        agent_role=task.agent_role,
+        status="NEEDS_REVIEW" if result.human_reason else "DONE",
+        result={
+            "summary": result.summary,
+            "risk_level": result.risk_level,
+            "confidence": result.confidence,
+            "human_reason": result.human_reason,
+            "rules_version": result.rules_version,
+        },
+        evidence=[source.model_dump(mode="json") for source in result.sources],
+        model_calls=[
+            ModelCall(
+                trace_id=result.trace_id,
+                model_version=result.model_version,
+                prompt_version=result.prompt_version,
+            )
+        ],
+        trace_id=task.trace_id,
+    )
+
+
 class RiskExecutor(AgentExecutor):
-    def __init__(self, gateway: ModelGateway) -> None:
-        self._gateway = gateway
+    def __init__(self, assessment: RiskAssessment) -> None:
+        self._assessment = assessment
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         if context.current_task is not None:
@@ -76,35 +127,51 @@ class RiskExecutor(AgentExecutor):
         data = parts[0] if len(parts) == 1 else None
         application_id = _identifier(data, "task_id")
         job_id = _identifier(data, "job_id")
-        trace_id = None
+        trace_id = _identifier(data, "trace_id")
         outcome = "ok"
+        task = None
 
         try:
             if message is None or message.role != Role.ROLE_USER or len(message.parts) != 1:
-                raise GatewayFailure("invalid_request", None)
+                raise GatewayFailure("invalid_request", trace_id)
             try:
-                request = RiskTaskV1.model_validate(data)
+                if isinstance(data, Mapping) and "agent_role" in data:
+                    task = AgentTask.model_validate(data)
+                request = _risk_request(data, task)
             except ValidationError:
-                raise GatewayFailure("invalid_request", None) from None
-            result = await self._gateway.assess(request, task_id)
+                raise GatewayFailure("invalid_request", trace_id) from None
+            result = await self._assessment.assess(request, task_id)
             trace_id = result.trace_id
+            artifact = _agent_result(task, result) if task is not None else result
             await updater.add_artifact(
-                [new_data_part(result.model_dump(mode="json"), media_type=_JSON)],
+                [new_data_part(artifact.model_dump(mode="json"), media_type=_JSON)],
                 name="risk_result",
             )
             await updater.complete()
         except GatewayFailure as error:
             trace_id = error.trace_id
             outcome = error.code
-            failure = RiskFailureV1(
-                kind="risk_failure.v1",
-                task_id=application_id,
-                job_id=job_id,
-                a2a_task_id=task_id,
-                trace_id=trace_id,
-                code=error.code,
-                retryable=error.retryable,
-            )
+            if task is None:
+                failure = RiskFailureV1(
+                    kind="risk_failure.v1",
+                    task_id=application_id,
+                    job_id=job_id,
+                    a2a_task_id=task_id,
+                    trace_id=trace_id,
+                    code=error.code,
+                    retryable=error.retryable,
+                )
+            else:
+                failure = AgentResult(
+                    task_id=task.task_id,
+                    job_id=task.job_id,
+                    agent_role=task.agent_role,
+                    status="FAILED",
+                    result={"code": error.code, "retryable": error.retryable},
+                    evidence=[],
+                    model_calls=[],
+                    trace_id=task.trace_id,
+                )
             await updater.failed(
                 new_data_message(
                     failure.model_dump(mode="json"),
@@ -130,7 +197,11 @@ class RiskExecutor(AgentExecutor):
         await TaskUpdater(event_queue, context.task_id, context.context_id).cancel()
 
 
-def create_app(settings: Settings, gateway_transport: httpx.AsyncBaseTransport | None) -> FastAPI:
+def create_app(
+    settings: Settings,
+    gateway_transport: httpx.AsyncBaseTransport | None,
+    risk_ledger: RiskLedger | None,
+) -> FastAPI:
     client = httpx.AsyncClient(
         base_url=str(settings.model_gateway_url),
         timeout=settings.model_gateway_timeout_seconds,
@@ -138,7 +209,22 @@ def create_app(settings: Settings, gateway_transport: httpx.AsyncBaseTransport |
         follow_redirects=False,
         transport=gateway_transport,
     )
+    redis = Redis.from_url(
+        str(settings.redis_url),
+        decode_responses=True,
+        socket_connect_timeout=settings.redis_timeout_seconds,
+        socket_timeout=settings.redis_timeout_seconds,
+        retry=Retry(NoBackoff(), 0),
+    )
+    ledger = (
+        risk_ledger
+        if risk_ledger is not None
+        else RedisRiskLedger(redis, settings.task_ttl_seconds, settings.task_lease_seconds)
+    )
     gateway = ModelGateway(client, settings.model_gateway_timeout_seconds)
+    assessment = RiskAssessment(
+        gateway, ledger, settings.task_wait_seconds, settings.task_poll_seconds
+    )
     card = AgentCard(
         name="TenderHive Risk Agent",
         description="Assesses contract risk through the TenderHive model gateway.",
@@ -162,12 +248,12 @@ def create_app(settings: Settings, gateway_transport: httpx.AsyncBaseTransport |
             )
         ],
     )
-    handler = DefaultRequestHandler(RiskExecutor(gateway), InMemoryTaskStore(), card)
+    handler = DefaultRequestHandler(RiskExecutor(assessment), InMemoryTaskStore(), card)
     dispatcher = JsonRpcDispatcher(handler)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        async with client:
+        async with client, redis:
             yield
 
     app = FastAPI(title="TenderHive Risk Agent", lifespan=lifespan)
@@ -190,11 +276,22 @@ def create_app(settings: Settings, gateway_transport: httpx.AsyncBaseTransport |
         return response
 
     @app.get("/healthz")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> JSONResponse:
+        try:
+            ready = await ledger.ready()
+        except RedisError:
+            ready = False
+        return JSONResponse(
+            {"status": "ok" if ready else "unavailable"}, status_code=200 if ready else 503
+        )
 
-    @app.get("/schemas/risk-v1.json")
+    @app.get("/schemas/risk-v1.json", include_in_schema=False)
+    @app.get("/api/v1/schemas/risk-v1.json")
     async def schema() -> dict[str, object]:
         return _SCHEMA.json_schema(mode="validation")
+
+    @app.get("/api/v1/schemas/agent-task.json")
+    async def agent_schema() -> dict[str, object]:
+        return _AGENT_SCHEMA.json_schema(mode="validation")
 
     return app

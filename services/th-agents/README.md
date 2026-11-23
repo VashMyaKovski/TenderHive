@@ -1,6 +1,6 @@
 # Рисковый агент TenderHive
 
-`th-agents` принимает проверенный фрагмент договора, вызывает `th-modelgw` через `POST /api/v1/inference` с задачей `risk_assessment` и возвращает оценку со ссылкой на исходный фрагмент. Шлюз маскирует данные, обращается к модели и применяет числовое правило. Агент сохраняет выданные шлюзом `confidence` и `human_reason`.
+`th-agents` принимает проверенный фрагмент договора, вызывает `th-modelgw` через `POST /api/v1/invoke` с задачей `risk_assessment` и возвращает оценку со ссылкой на исходный фрагмент. Шлюз маскирует данные, обращается к модели NVIDIA и применяет числовое правило. Агент сохраняет выданные шлюзом `confidence` и `human_reason`.
 
 ## API внутри сети Compose
 
@@ -8,12 +8,17 @@
 | --- | --- |
 | `GET /.well-known/agent-card.json` | Agent Card с навыком `risk_assessment` |
 | `POST /a2a` | A2A 1.0, JSON-RPC 2.0, метод `SendMessage` с ожиданием результата |
-| `GET /schemas/risk-v1.json` | JSON Schema входа, результата и ошибки |
-| `GET /healthz` | Готовность процесса принимать запросы |
+| `GET /api/v1/schemas/risk-v1.json` | JSON Schema входа, результата и ошибки |
+| `GET /api/v1/schemas/agent-task.json` | JSON Schema общего задания и результата агента |
+| `GET /healthz` | Готовность процесса и доступность Redis |
 
-Клиент отправляет заголовок `A2A-Version: 1.0` и одну структурированную часть `data` с `kind: risk_task.v1`. `task_id` принадлежит приложению, `a2a_task_id` присваивает A2A-сервер, `job_id` связывает подзадачу с тендером, а `trace_id` связывает ответ с вызовом шлюза. Проценты передаются десятичными строками. Значение `"0.15"` означает 0,15% в день. `source.url` и `source.locator` задают адрес документа и место в нём. Агент преобразует номера источников от шлюза в эти ссылки.
+Клиент отправляет заголовок `A2A-Version: 1.0` и одну структурированную часть `data` с `kind: risk_task.v1`. `task_id` принадлежит приложению, `a2a_task_id` присваивает A2A-сервер, `job_id` связывает подзадачу с тендером. Переданный клиентом `trace_id` передаётся в вызов шлюза. Если поле пропущено, агент создаёт идентификатор вызова. Проценты передаются десятичными строками. Значение `"0.15"` означает 0,15% в день. `source.url` и `source.locator` задают адрес документа и место в нём.
 
-Завершённая задача содержит артефакт `risk_result` с `kind: risk_result.v1`. Причина согласования может быть `penalty_above_threshold`, `unclear_requirements` или `null`. Сбой возвращается как задача `FAILED` с `kind: risk_failure.v1` в `status.message`. При неверном входе отсутствующие или невалидные идентификаторы имеют значение `null`. Состояния A2A хранятся в памяти одного процесса и сбрасываются при перезапуске. Для повторной оценки клиент отправляет новое `SendMessage`.
+Завершённая задача содержит артефакт `risk_result` с `kind: risk_result.v1` и ссылкой на проверенный фрагмент. Причина согласования может быть `penalty_above_threshold`, `unclear_requirements` или `null`. Сбой возвращается как задача `FAILED` с `kind: risk_failure.v1` в `status.message`.
+
+В общем формате `AgentTask` передайте `agent_role: "risk"` и `kb_version`, а поля `fragment_id`, `source`, `fragment_text`, `fragment_type`, `penalty_daily_percent`, `penalty_daily_threshold_percent` и `prompt_version` укажите в `input`. Результат содержит `DONE` или `NEEDS_REVIEW`, основания `evidence` и версии модели и промпта в `model_calls`. Для других ролей ответ содержит `FAILED` с кодом `role_unavailable`.
+
+Повторный `SendMessage` с тем же `task_id` и входом возвращает результат или постоянный отказ из Redis в пределах `TH_AGENTS_TASK_TTL_SECONDS`. Транспорт получает новый `a2a_task_id`, результат сохраняет `trace_id` исходной оценки. Одновременно выполняется одна оценка. Временный сбой допускает следующую попытку с тем же входом. После сбоя процесса повтор возможен по истечении аренды `TH_AGENTS_TASK_LEASE_SECONDS`. История A2A хранится в памяти процесса.
 
 Агент делает одну HTTP-попытку на подзадачу и передаёт признак возможности повтора вызывающему сервису.
 
@@ -22,8 +27,10 @@
 | `invalid_request`, `invalid_context`, `unsafe_context`, `unsupported_prompt_version`, `task_disabled` | `false` |
 | `provider_rejected`, `invalid_provider_response`, `invalid_gateway_response` | `false` |
 | `provider_unavailable`, `provider_timeout`, `gateway_timeout`, `gateway_transport_error` | `true` |
+| `gateway_storage_unavailable`, `task_in_progress`, `task_store_unavailable` | `true` |
+| `task_id_conflict` | `false` |
 
-Используйте `public_text` для проверенного публичного или предварительно обезличенного текста. Для вымышленных примеров используйте `synthetic_text`. `th-modelgw` применяет политику `data_collection=deny` к `public_text`.
+Используйте `public_text` для проверенного публичного или предварительно обезличенного текста и `synthetic_text` для вымышленных примеров.
 
 ## Воспроизводимый пример
 
@@ -39,7 +46,7 @@ docker compose -p tenderhive-agents-test --env-file .env.example -f compose.yaml
 
 ## Запуск с модельным шлюзом
 
-Укажите `OPENROUTER_API_KEY` и `OPENROUTER_MODEL_TEST` в корневом `.env`. Для прогона с опубликованным фрагментом проверьте маршрут выбранной модели с `public_text` на нейтральном тексте. Модель должна быть доступна с политикой `data_collection=deny`.
+Заполните настройки NVIDIA и ключ шифрования по [инструкции модельного шлюза](../th-modelgw/README.md).
 
 ```sh
 docker compose up --build --wait th-modelgw th-agents

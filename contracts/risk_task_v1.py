@@ -28,6 +28,11 @@ type FailureCode = Literal[
     "invalid_gateway_response",
     "gateway_timeout",
     "gateway_transport_error",
+    "gateway_storage_unavailable",
+    "task_id_conflict",
+    "task_in_progress",
+    "task_store_unavailable",
+    "role_unavailable",
 ]
 
 _DECIMAL = r"^(?:(?:0|[1-9][0-9]?)(?:\.[0-9]{1,6})?|100(?:\.0{1,6})?)$"
@@ -54,18 +59,22 @@ class SourceReference(Contract):
     locator: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
-class RiskTaskV1(Contract):
-    kind: Literal["risk_task.v1"]
-    task_id: UUID
-    job_id: UUID
+class RiskInput(Contract):
     fragment_id: UUID
     source: SourceReference
     fragment_text: Text
     fragment_type: Literal["synthetic_text", "public_text"]
-    rules_version: Identifier
     penalty_daily_percent: WirePercent
     penalty_daily_threshold_percent: WirePercent
     prompt_version: Identifier
+
+
+class RiskTaskV1(RiskInput):
+    kind: Literal["risk_task.v1"]
+    task_id: UUID
+    job_id: UUID
+    rules_version: Identifier
+    trace_id: UUID | None = None
 
 
 class RiskSourceV1(Contract):

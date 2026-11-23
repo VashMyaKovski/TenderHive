@@ -57,6 +57,10 @@ _UNCLASSIFIED = re.compile(
 
 
 def redact_public_text(text: str) -> str:
+    return mask_public_text(text)[0]
+
+
+def mask_public_text(text: str) -> tuple[str, tuple[tuple[str, str], ...]]:
     # Normalization makes lookalike spacing and format controls ineffective as separators.
     normalized = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
     normalized = "".join(
@@ -64,12 +68,16 @@ def redact_public_text(text: str) -> str:
         for char in normalized
         if unicodedata.category(char) not in {"Cf", "Cc"} or char == "\n" or char == "\t"
     )
+    replacements: list[tuple[str, str]] = []
     for category, pattern in _REDACTIONS:
-        normalized = pattern.sub(f"[REDACTED_{category}]", normalized)
+        token = f"[REDACTED_{category}]"
+        matches = pattern.finditer(normalized)
+        replacements.extend((token, match.group()) for match in matches)
+        normalized = pattern.sub(token, normalized)
     if _UNCLASSIFIED.search(normalized) or any(
         pattern.search(normalized) for _, pattern in _REDACTIONS
     ):
         raise GatewayError(Failure.UNSAFE_CONTEXT)
     if not normalized.strip():
         raise GatewayError(Failure.UNSAFE_CONTEXT)
-    return normalized.strip()
+    return normalized.strip(), tuple(replacements)

@@ -1,20 +1,28 @@
 from base64 import b64decode, b64encode
 from binascii import Error as Base64Error
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 
 from PIL import Image
 
 from modelgw.errors import Failure, GatewayError
-from modelgw.privacy import redact_public_text
+from modelgw.privacy import mask_public_text
 from modelgw.schemas import (
     InferenceRequest,
     Knowledge,
     Penalty,
     PublicImage,
     PublicText,
+    SensitiveText,
     SyntheticText,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class Replacement:
+    fragment: int
+    token: str
+    value: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,12 +31,21 @@ class PreparedContext:
     image_url: str | None
     knowledge: Knowledge | None
     penalty: Penalty | None
-    synthetic: bool
+    replacements: tuple[Replacement, ...] = field(repr=False)
 
 
 def prepare_context(request: InferenceRequest) -> PreparedContext:
-    text_items = [item for item in request.context if isinstance(item, PublicText | SyntheticText)]
-    public_texts = tuple(redact_public_text(item.text) for item in text_items)
+    public_texts: list[str] = []
+    replacements: list[Replacement] = []
+    for index, item in enumerate(request.context, start=1):
+        if isinstance(item, PublicText | SyntheticText):
+            safe_text, matches = mask_public_text(item.text)
+            public_texts.append(safe_text)
+            replacements.extend(Replacement(index, token, value) for token, value in matches)
+        if isinstance(item, SensitiveText):
+            replacements.append(
+                Replacement(index, f"[REDACTED_{item.category.upper()}]", item.text)
+            )
     images = [item for item in request.context if isinstance(item, PublicImage)]
     rules = [item for item in request.context if isinstance(item, Knowledge)]
     penalties = [item for item in request.context if isinstance(item, Penalty)]
@@ -46,13 +63,11 @@ def prepare_context(request: InferenceRequest) -> PreparedContext:
         raise GatewayError(Failure.INVALID_CONTEXT)
 
     return PreparedContext(
-        texts=public_texts,
+        texts=tuple(public_texts),
         image_url=_normalize_image(images[0].data) if images else None,
         knowledge=rules[0] if rules else None,
         penalty=penalties[0] if penalties else None,
-        synthetic=bool(text_items)
-        and not images
-        and all(isinstance(item, SyntheticText) for item in text_items),
+        replacements=tuple(replacements),
     )
 
 
@@ -64,9 +79,10 @@ def _normalize_image(encoded: str) -> str:
         with Image.open(BytesIO(data), formats=["PNG", "JPEG"]) as image:
             if image.width * image.height > 4_000_000 or getattr(image, "n_frames", 1) != 1:
                 raise GatewayError(Failure.INVALID_CONTEXT)
-            # A fresh pixel buffer drops metadata, including EXIF, comments and auxiliary chunks.
-            clean = Image.new("RGB", image.size)
-            clean.paste(image.convert("RGB"))
+            # A fresh pixel buffer drops metadata. Compositing discards fully transparent colors.
+            pixels = image.convert("RGBA")
+            clean = Image.new("RGB", image.size, "white")
+            clean.paste(pixels, (0, 0), pixels.getchannel("A"))
             output = BytesIO()
             clean.save(output, format="JPEG", quality=85)
     except Base64Error, ValueError, OSError, Image.DecompressionBombError:

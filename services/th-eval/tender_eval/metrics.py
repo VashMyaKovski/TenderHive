@@ -51,6 +51,8 @@ class Summary(Contract):
     p95_latency_ms: float | None
     trace_id_coverage: float | None
     trace_eligible_responses: int
+    gateway_cache_hits: int = 0
+    gateway_cache_observations: int = 0
     repeat_agreement: float | None
     repeated_cases: int
 
@@ -119,6 +121,8 @@ def summarize(observations: tuple[Observation, ...], buckets: int) -> Summary:
             sum(item.trace_id is not None for item in responses), len(responses)
         ),
         trace_eligible_responses=len(responses),
+        gateway_cache_hits=sum(item.cached is True for item in observations),
+        gateway_cache_observations=sum(item.cached is not None for item in observations),
         repeat_agreement=agreement,
         repeated_cases=repeated_cases,
     )
@@ -179,7 +183,10 @@ def _percentile(sorted_values: list[float], percentile: float) -> float | None:
 
 def _repeat_agreement(observations: tuple[Observation, ...]) -> tuple[float | None, int]:
     by_case: dict[UUID, list[tuple[object, ...]]] = defaultdict(list)
+    observable_cases: set[UUID] = set()
     for item in observations:
+        if item.fault is None and item.http_status is not None:
+            observable_cases.add(item.case_id)
         predicted = item.prediction
         semantic = (
             (
@@ -194,9 +201,16 @@ def _repeat_agreement(observations: tuple[Observation, ...]) -> tuple[float | No
             else ()
         )
         by_case[item.case_id].append(
-            (item.http_status, item.error, item.fault, item.issues, semantic)
+            (
+                item.http_status,
+                item.error,
+                item.unavailable_reason,
+                item.fault,
+                item.issues,
+                semantic,
+            )
         )
-    repeated = [set(signatures) for signatures in by_case.values() if len(signatures) > 1]
+    repeated = [set(by_case[case_id]) for case_id in observable_cases if len(by_case[case_id]) > 1]
     return _ratio(sum(len(signatures) == 1 for signatures in repeated), len(repeated)), len(
         repeated
     )

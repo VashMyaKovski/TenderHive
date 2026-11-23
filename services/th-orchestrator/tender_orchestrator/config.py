@@ -4,6 +4,7 @@ from pydantic import (
     Field,
     HttpUrl,
     IPvAnyAddress,
+    RedisDsn,
     SecretStr,
     StringConstraints,
     field_validator,
@@ -43,6 +44,14 @@ class Settings(BaseSettings):
     review_timeout_seconds: Annotated[float, Field(gt=0, le=31_536_000, allow_inf_nan=False)]
     poll_interval_seconds: PositiveTimeout
     poll_batch_size: Annotated[int, Field(ge=1, le=1000)]
+    redis_url: RedisDsn
+    io_timeout_seconds: PositiveTimeout
+    checkpoint_ttl_seconds: Annotated[int, Field(ge=1, le=604800)]
+    kafka_brokers: Annotated[
+        list[Annotated[str, StringConstraints(pattern=r"^[^\s:/]+:[0-9]{1,5}$")]],
+        Field(min_length=1),
+    ]
+    kafka_group_id: Name
     service_token: Token
     reviewers: Annotated[list[ReviewerCredential], Field(min_length=1)]
     bind_host: IPvAnyAddress
