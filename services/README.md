@@ -6,11 +6,11 @@
 | --- | --- | --- |
 | [`th-orchestrator/`](th-orchestrator/README.md) | Python, FastAPI, LangGraph | Состояние задания, оценка риска через A2A, ожидание ответа и эскалация |
 | [`th-agents/`](th-agents/README.md) | Python, FastAPI, A2A | Оценка риска по фрагменту договора через `th-modelgw` |
-| `th-solver/` | Python | Продукционные правила, RAG, рекомендация и объяснение результата |
-| `th-kb/` | Python | Правила, факты, справочники, корпус и версии знаний. Использует PostgreSQL, Neo4j и Qdrant |
+| [`th-solver/`](th-solver/README.md) | Python, FastAPI | Продукционные правила, RAG, рекомендация и объяснение результата |
+| [`th-kb/`](th-kb/README.md) | Python, FastAPI | Правила, факты, справочники, корпус и версии знаний. Использует PostgreSQL, Neo4j и Qdrant |
 | [`th-modelgw/`](th-modelgw/README.md) | Python, FastAPI | Единый доступ к внешним моделям. Шаблоны промптов, маскирование, проверка ответов и кэш |
 | [`th-eval/`](th-eval/README.md) | Python | Наборы сценариев, регрессии, метрики и бенчмарки моделей и промптов |
-| `th-integrations/` | Python, MCP | Автоматический приём тендерных документов по почте и MCP-заглушки для внешних систем |
+| [`th-integrations/`](th-integrations/README.md) | Python, MCP | Автоматический приём тендерных документов по почте и MCP-заглушки для внешних систем |
 | `th-docintel/` | Python, Tesseract, C++, gRPC | Python извлекает текст и таблицы и выполняет OCR. C++-ядро нормализует текст, разбирает числа, сроки и штрафы |
 | `th-gateway/` | C#, ASP.NET Core | Telegram-бот, загрузка файлов, авторизация, регистрация задания и выдача артефактов |
 | `th-web/` | C#, Blazor | Дашборд заданий, согласования и управление базой знаний через API шлюза |

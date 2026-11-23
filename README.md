@@ -28,6 +28,14 @@ docker compose ps
 
 `th-orchestrator` проводит то же задание через оценку риска, карточку согласования и продолжение после перезапуска. [Сценарий с PostgreSQL и тестовым шлюзом](services/th-orchestrator/README.md)
 
+База знаний, решатель и приём почты поднимаются профилями `kb`, `solver` и `integrations`:
+
+```sh
+docker compose --profile kb --profile solver --profile integrations up --build --wait
+```
+
+Контракты этих сервисов описаны в их README: [th-kb](services/th-kb/README.md), [th-solver](services/th-solver/README.md), [th-integrations](services/th-integrations/README.md).
+
 | Компонент | Адрес с хоста по умолчанию | Адрес внутри Compose |
 | --- | --- | --- |
 | PostgreSQL | `127.0.0.1:5432` | `postgres:5432` |
@@ -39,7 +47,7 @@ docker compose ps
 
 Для локального мониторинга запустите `docker compose --profile monitoring up --wait`. OpenTelemetry Collector принимает метрики по OTLP/gRPC на `127.0.0.1:4317` и OTLP/HTTP на `127.0.0.1:4318`. Prometheus доступен на `http://127.0.0.1:9090`, Grafana с настроенным источником Prometheus — на `http://127.0.0.1:3000`. Учётные данные Grafana задаются в `.env`. Инструментирование приложений и хранение трассировок добавляются вместе с сервисами.
 
-Остановить стек можно командой `docker compose --profile monitoring --profile modelgw --profile eval --profile agents --profile orchestrator down`. Именованные тома PostgreSQL, Neo4j, Qdrant, Kafka и отчётов `th-eval` сохраняются.
+Остановить стек можно командой `docker compose --profile monitoring --profile modelgw --profile eval --profile agents --profile orchestrator --profile kb --profile solver --profile integrations down`. Именованные тома PostgreSQL, Neo4j, Qdrant, Kafka и отчётов `th-eval` сохраняются.
 
 ## Проверки
 

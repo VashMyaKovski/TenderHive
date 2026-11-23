@@ -58,13 +58,37 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked pyright
           uv run --locked pytest
+      - name: Check the knowledge base
+        working-directory: services/th-kb
+        run: |
+          uv sync --locked
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked pyright
+          uv run --locked pytest
+      - name: Check the solver
+        working-directory: services/th-solver
+        run: |
+          uv sync --locked
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked pyright
+          uv run --locked pytest
+      - name: Check integrations
+        working-directory: services/th-integrations
+        run: |
+          uv sync --locked
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked pyright
+          uv run --locked pytest
 
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - run: docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval --profile agents --profile orchestrator config --quiet
+      - run: docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval --profile agents --profile orchestrator --profile kb --profile solver --profile integrations config --quiet
       - run: docker compose --env-file .env.example run --build --rm th-eval
       - run: docker compose --env-file .env.example --profile monitoring up --wait --wait-timeout 180
       - run: docker compose --env-file .env.example run --rm kafka-init
