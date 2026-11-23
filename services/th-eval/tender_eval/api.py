@@ -12,6 +12,7 @@ from starlette.middleware.base import RequestResponseEndpoint
 from tender_eval.application import compare_saved_runs, evaluate_run
 from tender_eval.cases import DatasetError
 from tender_eval.config import ApiSettings
+from tender_eval.knowledge import router_for
 from tender_eval.run_models import ErrorResponse, RunRequest, RunResult
 from tender_eval.storage import RunInProgress, Store
 from tender_eval.telemetry import publish_metrics
@@ -43,6 +44,7 @@ def create_app(settings: ApiSettings, store: Store) -> FastAPI:
         version="1.0.0",
         responses={status: {"model": ErrorResponse} for status in (422, 503)},
     )
+    app.include_router(router_for(settings))
 
     @app.middleware("http")
     async def correlate(request: Request, call_next: RequestResponseEndpoint) -> Response:
