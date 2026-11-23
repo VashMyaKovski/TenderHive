@@ -4,7 +4,7 @@ on:
   push:
     branches: [dev, main]
   pull_request:
-    branches: [dev, main]
+    branches: [dev, main, 'feat/**']
 
 permissions:
   contents: read
@@ -50,13 +50,21 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked pyright
           uv run --locked pytest
+      - name: Check the orchestrator
+        working-directory: services/th-orchestrator
+        run: |
+          uv sync --locked
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked pyright
+          uv run --locked pytest
 
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - run: docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval --profile agents config --quiet
+      - run: docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval --profile agents --profile orchestrator config --quiet
       - run: docker compose --env-file .env.example run --build --rm th-eval
       - run: docker compose --env-file .env.example --profile monitoring up --wait --wait-timeout 180
       - run: docker compose --env-file .env.example run --rm kafka-init
@@ -106,3 +114,32 @@ jobs:
       - name: Stop the stack
         if: always()
         run: docker compose --env-file .env.example --profile agents down
+
+  orchestrator-compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMPOSE_FILE: compose.yaml:services/th-agents/tests/compose.yaml:services/th-orchestrator/tests/compose.yaml
+      COMPOSE_PROFILES: agents,orchestrator
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose --env-file .env.example config --quiet
+      - run: docker compose --env-file .env.example up --build --wait --wait-timeout 120 th-orchestrator
+      - name: Verify checkpoints, decisions and deadlines on PostgreSQL
+        run: >-
+          docker compose --env-file .env.example run --build --rm --no-deps th-orchestrator-tests
+          uv run --locked --no-sync pytest --with-postgres
+      - name: Resume the public tender after a container restart
+        run: |
+          job=751da55e-033e-4ad7-9993-858d44d52eb1
+          demo=(python -m tests.demo --url http://th-orchestrator:8000 --job-id "$job" --fixture examples/minsk-supply-risk.json)
+          docker compose --env-file .env.example run --rm --no-deps th-orchestrator-tests "${demo[@]}" start
+          docker compose --env-file .env.example restart th-orchestrator
+          docker compose --env-file .env.example up --no-build --wait --wait-timeout 120 th-orchestrator
+          docker compose --env-file .env.example run --rm --no-deps th-orchestrator-tests "${demo[@]}" continue
+      - name: Print container logs on failure
+        if: failure()
+        run: docker compose --env-file .env.example logs --no-color th-orchestrator th-orchestrator-migrate th-agents postgres
+      - name: Stop the stack
+        if: always()
+        run: docker compose --env-file .env.example down
