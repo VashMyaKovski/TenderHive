@@ -48,6 +48,19 @@ x-th-eval-api: &th-eval-api-settings
     TH_EVAL_BIND_HOST: 0.0.0.0
     TH_EVAL_PORT: ${TH_EVAL_PORT:-8000}
 
+x-th-kb: &th-kb-settings
+  profiles: ["kb"]
+  build:
+    context: ./services/th-kb
+  env_file:
+    - ./services/th-kb/.env.example
+    - path: ./services/th-kb/.env
+      required: false
+  environment:
+    KB_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env}
+    KB_EVAL_TOKEN: ${KB_EVAL_TOKEN:-local-demo-kb-eval-token}
+    KB_PORT: ${KB_PORT:-8000}
+
 services:
   postgres:
     image: postgres:17.9
@@ -231,6 +244,31 @@ services:
       test: ["CMD", "python", "-m", "tender_eval", "healthcheck"]
       interval: 5s
       timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  th-kb-migrate:
+    <<: *th-kb-settings
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  th-kb:
+    <<: *th-kb-settings
+    ports:
+      - "127.0.0.1:${KB_HOST_PORT:-8005}:${KB_PORT:-8000}"
+    depends_on:
+      th-kb-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "tender_kb", "healthcheck"]
+      interval: 5s
+      timeout: 15s
       retries: 10
       start_period: 5s
 

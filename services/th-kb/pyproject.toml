@@ -1,0 +1,38 @@
+[project]
+name = "th-kb"
+version = "0.1.0"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "fastapi>=0.118.3",
+    "httpx>=0.28.1",
+    "neo4j>=6.0,<7",
+    "psycopg[binary]>=3.2.13",
+    "pydantic>=2.12,<3",
+    "pydantic-settings>=2.14.2",
+    "redis>=7,<9",
+    "uvicorn>=0.30.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.4", "pytest-asyncio>=1.5", "ruff>=0.14", "pyright>=1.1.400"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "ASYNC"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tender_kb"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"
+include = ["tender_kb", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
