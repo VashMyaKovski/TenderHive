@@ -43,6 +43,14 @@ docker compose ps
 
 ## Проверки
 
+Перед коммитом запускаются pre-commit хуки `ruff` и `ruff-format`. Установите их один раз после синхронизации окружения:
+
+```sh
+uv run --locked pre-commit install
+```
+
+Хуки находятся в [`.pre-commit-config.yaml`](.pre-commit-config.yaml) и используют версию Ruff из `uv.lock`. Полный набор проверок:
+
 ```sh
 uv run --locked ruff check .
 uv run --locked ruff format --check .
