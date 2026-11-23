@@ -4,7 +4,7 @@
 
 | Каталог | Стек | Ответственность |
 | --- | --- | --- |
-| `th-orchestrator/` | Python, FastAPI, LangGraph | Состояние задания, чекпоинты, повтор этапов и остановки для согласования |
+| [`th-orchestrator/`](th-orchestrator/README.md) | Python, FastAPI, LangGraph | Состояние задания, оценка риска через A2A, ожидание ответа и эскалация |
 | [`th-agents/`](th-agents/README.md) | Python, FastAPI, A2A | Оценка риска по фрагменту договора через `th-modelgw` |
 | `th-solver/` | Python | Продукционные правила, RAG, рекомендация и объяснение результата |
 | `th-kb/` | Python | Правила, факты, справочники, корпус и версии знаний. Использует PostgreSQL, Neo4j и Qdrant |

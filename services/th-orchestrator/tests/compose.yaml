@@ -1,0 +1,23 @@
+services:
+  postgres:
+    volumes: !reset []
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  th-orchestrator:
+    depends_on:
+      th-agents:
+        condition: service_healthy
+
+  th-orchestrator-tests:
+    profiles: ["orchestrator"]
+    build:
+      context: .
+      dockerfile: services/th-orchestrator/Dockerfile
+      target: test
+    env_file:
+      - ./services/th-orchestrator/.env.example
+    environment:
+      TH_ORCHESTRATOR_DATABASE_NAME: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+      TH_ORCHESTRATOR_DATABASE_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+      TH_ORCHESTRATOR_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
