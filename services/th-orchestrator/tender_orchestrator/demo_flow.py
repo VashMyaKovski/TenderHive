@@ -640,5 +640,7 @@ if __name__ == "__main__":
                 }
             )
         )
+        if final.phase == "failed":
+            raise SystemExit(1)
 
     asyncio.run(main())
