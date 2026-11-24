@@ -22,6 +22,10 @@ from contracts.agent_task import AgentResult, AgentTask
 from contracts.models import Artifact, Document, SolverResult
 from tender_orchestrator.models import JobView
 
+_PUBLIC_NOTICE = (
+    "https://www.bicotender.ru/ximiia/zakupka-xoziaistvennyx-tovarov-minsk-tender341041674.html"
+)
+
 
 class DemoSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DEMO_", extra="ignore")
@@ -60,7 +64,11 @@ def _ok(response: httpx.Response) -> httpx.Response:
 
 
 def _pdf() -> bytes:
-    stream = b"BT /F1 12 Tf 30 150 Td (Synthetic delivery terms) Tj ET"
+    stream = (
+        b"BT /F1 11 Tf 20 160 Td (Tender 341041674 - Lot 3: 996 rolls of refuse bags) Tj "
+        b"0 -18 Td (Offer validity: at least 60 working days) Tj "
+        b"0 -18 Td (Public notice data, prepared acceptance-test extract) Tj ET"
+    )
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -88,10 +96,12 @@ def send_mail(settings: DemoSettings, external_ref: str) -> None:
     message = EmailMessage()
     message["From"] = "synthetic-sender@example.test"
     message["To"] = settings.recipient
-    message["Subject"] = "TenderHive synthetic delivery exercise"
+    message["Subject"] = "TenderHive acceptance test: public tender 341041674, lot 3"
     message["Date"] = format_datetime(datetime.now(UTC))
     message["Message-ID"] = external_ref
-    message.set_content("Synthetic TenderHive demonstration.")
+    message.set_content(
+        "Acceptance test from public procurement data. Supplier inputs are simulated."
+    )
     message.add_attachment(_pdf(), maintype="application", subtype="pdf", filename="scenario.pdf")
     with smtplib.SMTP(
         settings.smtp_host, settings.smtp_port, timeout=settings.timeout_seconds
@@ -179,11 +189,11 @@ def _inputs(view: JobView) -> dict[str, object]:
     document = next(item for item in job.documents if isinstance(item, Document))
     item = {
         "requirement_id": _identifier(job.job_id, "requirement"),
-        "text": "At least five years of delivery experience",
-        "kind": "qualification",
+        "text": "Offer validity of at least 60 working days",
+        "kind": "deadline",
         "mandatory": True,
-        "value": 5,
-        "unit": "years",
+        "value": 60,
+        "unit": "working days",
         "source": {
             "file_id": str(document.file_id),
             "page": 1,
@@ -204,8 +214,8 @@ def _inputs(view: JobView) -> dict[str, object]:
         "facts": [
             {
                 "fact_id": _identifier(job.job_id, "fact"),
-                "key": "experience",
-                "value": 6,
+                "key": "offer_validity_workdays",
+                "value": 65,
                 "source": document.storage_path,
             }
         ],
@@ -214,12 +224,12 @@ def _inputs(view: JobView) -> dict[str, object]:
             "task_class": "supply",
             "positions": [
                 {
-                    "position_id": "paper",
-                    "description": "Printer paper",
-                    "quantity": "10",
-                    "available": "12",
-                    "unit_cost": "8",
-                    "offer_unit_price": "10",
+                    "position_id": "lot-3-refuse-bags",
+                    "description": "Refuse bags, rolls (public lot 3)",
+                    "quantity": "996",
+                    "available": "1000",
+                    "unit_cost": "4.5",
+                    "offer_unit_price": "5.6",
                     "supply_deadline": None,
                     "alternatives": [],
                 }
@@ -254,7 +264,7 @@ async def advance(
     job = view.job
     document = next(item for item in job.documents if isinstance(item, Document))
     trace = job.trace_id or uuid5(job.job_id, "trace")
-    source = {"url": document.storage_path, "locator": "Synthetic normalized text, page 1"}
+    source = {"url": _PUBLIC_NOTICE, "locator": "Tender 341041674, lot 3 and offer form"}
     inputs = _inputs(view)
     if view.stage == "extract" and view.phase == "accepted":
         attachment = _ok(
@@ -264,7 +274,7 @@ async def advance(
             )
         ).content
         if sha256(attachment).hexdigest() != document.checksum or attachment != _pdf():
-            raise RuntimeError("The prepared fixture must match the received synthetic PDF")
+            raise RuntimeError("The prepared case must match the received public-notice extract")
         extracted = await agent(
             http, settings, view, "extraction", {"requirements": inputs["requirements"]}
         )
@@ -282,11 +292,14 @@ async def advance(
                     "task_id": _identifier(job.job_id, "risk"),
                     "job_id": str(job.job_id),
                     "fragment_id": _identifier(job.job_id, "contract"),
-                    "source": source,
-                    "fragment_text": "The fictional contract includes a daily late delivery penalty.",
-                    "fragment_type": "synthetic_text",
+                    "source": {
+                        "url": _PUBLIC_NOTICE,
+                        "locator": "Draft supply contract, clause 6.2",
+                    },
+                    "fragment_text": "The published draft includes a daily penalty for late delivery.",
+                    "fragment_type": "public_text",
                     "rules_version": job.kb_version,
-                    "penalty_daily_percent": "0.25",
+                    "penalty_daily_percent": "0.15",
                     "penalty_daily_threshold_percent": "0.1",
                     "prompt_version": "v1",
                     "trace_id": str(trace),
@@ -337,9 +350,9 @@ async def advance(
                     {
                         "positions": [
                             {
-                                "position_id": "paper",
-                                "required_quantity": "10",
-                                "available_quantity": "12",
+                                "position_id": "lot-3-refuse-bags",
+                                "required_quantity": "996",
+                                "available_quantity": "1000",
                                 "source": source,
                             }
                         ],
@@ -352,14 +365,14 @@ async def advance(
                     "estimate",
                     {
                         "currency": "BYN",
-                        "offer_price": "100",
+                        "offer_price": "5577.60",
                         "margin_threshold_percent": "10",
                         "threshold_source": source,
                         "positions": [
                             {
-                                "position_id": "paper",
-                                "quantity": "10",
-                                "unit_cost": "8",
+                                "position_id": "lot-3-refuse-bags",
+                                "quantity": "996",
+                                "unit_cost": "4.5",
                                 "source": source,
                             }
                         ],
@@ -373,14 +386,14 @@ async def advance(
                     {
                         "positions": [
                             {
-                                "position_id": "paper",
-                                "required_quantity": "10",
+                                "position_id": "lot-3-refuse-bags",
+                                "required_quantity": "996",
                                 "delivery_deadline": "2099-12-20T00:00:00Z",
                                 "source": source,
                                 "offers": [
                                     {
                                         "supplier": "Synthetic supplier",
-                                        "available_quantity": "12",
+                                        "available_quantity": "1000",
                                         "delivery_at": "2099-12-10T00:00:00Z",
                                         "source": source,
                                     }
@@ -540,15 +553,15 @@ async def seed(http: httpx.AsyncClient, settings: DemoSettings) -> None:
         "version": version,
         "rules": [
             {
-                "rule_id": "R-DEMO-EXPERIENCE",
+                "rule_id": "R-DEMO-OFFER-VALIDITY",
                 "version": 1,
                 "priority": 50,
-                "condition": {"field": "experience", "op": "gte", "value": 5},
+                "condition": {"field": "offer_validity_workdays", "op": "gte", "value": 60},
                 "consequence": {
                     "status": "MET",
-                    "reason": "Experience confirmed by the synthetic profile.",
+                    "reason": "The simulated offer meets the published minimum validity.",
                 },
-                "scope": {"kind": "qualification", "regime": "commercial", "task_class": "supply"},
+                "scope": {"kind": "deadline", "regime": "commercial", "task_class": "supply"},
             }
         ],
         "facts": [],
@@ -557,14 +570,14 @@ async def seed(http: httpx.AsyncClient, settings: DemoSettings) -> None:
         "corpus_fragments": [
             {
                 "fragment_id": "demo-corpus",
-                "text": "Qualification requires verified delivery experience.",
-                "source": "Synthetic procurement brief",
+                "text": "Public tender lot three requires refuse bags and a minimum offer validity in working days.",
+                "source": _PUBLIC_NOTICE,
                 "date": "2026-01-01",
             }
         ],
         "test_cases": [
             {
-                "case_id": "qualification",
+                "case_id": "deadline",
                 "input": _inputs(view),
                 "expected": {"status": "READY", "stop_reasons": [], "compliance": ["MET"]},
             }
