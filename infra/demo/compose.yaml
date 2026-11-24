@@ -1,4 +1,8 @@
 services:
+  th-modelgw:
+    environment:
+      OPENROUTER_EMBEDDING_MODEL: ${OPENROUTER_EMBEDDING_MODEL:-openai/text-embedding-3-small}
+
   th-orchestrator:
     environment:
       TH_ORCHESTRATOR_ARTIFACT_TOKEN: replace-with-local-demo-token
