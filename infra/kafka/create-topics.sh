@@ -4,6 +4,7 @@ set -eu
 for topic in \
     tender.job.created \
     tender.stage.done \
+    tender.agent.completed \
     tender.human.required \
     tender.human.decided \
     tender.artifacts.ready

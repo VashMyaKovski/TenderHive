@@ -3,14 +3,16 @@ import json
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import reportlab
 from a2a.helpers.proto_helpers import get_data_parts
 from a2a.types.a2a_pb2 import TaskState
 
-from contracts.agent_task import AgentResult
+from contracts.agent_task import AgentCompleted, AgentResult
 from contracts.risk_task_v1 import HumanReason, RiskFailureV1, RiskResultV1
 from tender_agents.api import create_app
 from tender_agents.config import Settings
@@ -19,11 +21,13 @@ from tender_agents.ledger import Claim, RiskLedger
 from tests.gateway_stub import response_for
 
 ORIGIN = "http://agent.invalid"
+TEST_ARTIFACT_TOKEN = "test-only-service-access-token"
 
 
 class MemoryLedger:
     def __init__(self) -> None:
         self._states: dict[UUID, tuple[str, UUID | None, str]] = {}
+        self.completions: list[AgentCompleted] = []
 
     async def claim(self, task_id: UUID, fingerprint: str, owner: UUID) -> Claim:
         current = self._states.get(task_id)
@@ -38,11 +42,15 @@ class MemoryLedger:
         self._states[task_id] = fingerprint, owner, ""
         return "owned", ""
 
-    async def finish(self, task_id: UUID, owner: UUID, outcome: str) -> bool:
+    async def finish(
+        self, task_id: UUID, owner: UUID, outcome: str, completion: AgentCompleted | None
+    ) -> bool:
         fingerprint, active, _ = self._states[task_id]
         if active != owner:
             return False
         self._states[task_id] = fingerprint, None, outcome
+        if completion is not None:
+            self.completions.append(completion)
         return True
 
     async def ready(self) -> bool:
@@ -62,6 +70,18 @@ async def agent(
     | Callable[[httpx.Request], Coroutine[None, None, httpx.Response]],
     ledger: RiskLedger | None = None,
 ) -> AsyncIterator[httpx.AsyncClient]:
+    with TemporaryDirectory() as directory:
+        async with _agent_with_storage(gateway, ledger, Path(directory)) as client:
+            yield client
+
+
+@asynccontextmanager
+async def _agent_with_storage(
+    gateway: Callable[[httpx.Request], httpx.Response]
+    | Callable[[httpx.Request], Coroutine[None, None, httpx.Response]],
+    ledger: RiskLedger | None,
+    directory: Path,
+) -> AsyncIterator[httpx.AsyncClient]:
     settings = Settings.model_validate(
         {
             "model_gateway_url": "http://gateway.invalid",
@@ -75,6 +95,12 @@ async def agent(
             "task_lease_seconds": 10,
             "task_wait_seconds": 0.2,
             "task_poll_seconds": 0.001,
+            "kafka_brokers": ["unused.invalid:9092"],
+            "completion_poll_seconds": 0.05,
+            "completion_timeout_seconds": 1,
+            "artifact_root": directory,
+            "pdf_font_path": Path(str(reportlab.__file__)).parent / "fonts" / "Vera.ttf",
+            "artifact_token": TEST_ARTIFACT_TOKEN,
         }
     )
     app = create_app(settings, httpx.MockTransport(gateway), ledger or MemoryLedger())
@@ -117,7 +143,15 @@ async def test_a2a_sdk_reads_card_and_returns_validated_result(
         card = (await client.get(ORIGIN + "/.well-known/agent-card.json")).json()
         schema = (await client.get(ORIGIN + "/api/v1/schemas/risk-v1.json")).json()
 
-    assert [item["id"] for item in card["skills"]] == ["risk_assessment"]
+    assert {item["id"] for item in card["skills"]} == {
+        "risk_assessment",
+        "extraction",
+        "legal",
+        "resource",
+        "estimate",
+        "supply",
+        "document",
+    }
     assert len(card["supportedInterfaces"]) == 1
     assert "RiskTaskV1" in schema["$defs"]
     assert raw.status.state == TaskState.TASK_STATE_COMPLETED
@@ -344,7 +378,7 @@ async def test_duplicate_task_reuses_outcome_across_workers(payload: dict[str, o
     assert failure.code == "task_id_conflict" and not failure.retryable
 
 
-async def test_common_agent_contract_reports_review_and_unavailable_roles(
+async def test_common_agent_contract_reports_review_and_invalid_inputs(
     payload: dict[str, object],
 ) -> None:
     trace_id = uuid4()
@@ -375,11 +409,11 @@ async def test_common_agent_contract_reports_review_and_unavailable_roles(
 
     async with agent(gateway) as client:
         completed = await send(client, ORIGIN, body)
-        unavailable = await send(client, ORIGIN, {**body, "agent_role": "legal"})
+        invalid = await send(client, ORIGIN, {**body, "agent_role": "legal"})
     assert calls == 1
     result = AgentResult.model_validate(get_data_parts(completed.artifacts[0].parts)[0])
     assert result.status == "NEEDS_REVIEW"
     assert result.model_calls[0].trace_id == result.trace_id == trace_id
     assert result.evidence[0]["source"] == payload["source"]
-    failed = AgentResult.model_validate(get_data_parts(unavailable.status.message.parts)[0])
-    assert failed.status == "FAILED" and failed.result["code"] == "role_unavailable"
+    failed = AgentResult.model_validate(get_data_parts(invalid.status.message.parts)[0])
+    assert failed.status == "FAILED" and failed.result["code"] == "invalid_request"
