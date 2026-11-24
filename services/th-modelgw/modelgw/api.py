@@ -20,8 +20,8 @@ from modelgw.application import Gateway
 from modelgw.cache import RedisCache
 from modelgw.config import Settings
 from modelgw.errors import Failure, GatewayError
-from modelgw.nvidia import Nvidia
 from modelgw.postgres import PostgresJournal
+from modelgw.provider import OpenAICompatibleProvider
 from modelgw.schemas import (
     InferenceRequest,
     InferenceResponse,
@@ -124,25 +124,29 @@ def create_app(settings: Settings) -> FastAPI:
         )
         async with AsyncExitStack() as exit_stack, client:
             models = settings.models()
-            nvidia = None
-            api_key = settings.nvidia_api_key
-            if api_key is not None and any(models.values()):
+            model_provider = None
+            base_url, api_key = settings.provider_connection()
+            embedding_input_type = (
+                settings.embedding_input_type if settings.provider == "nvidia" else None
+            )
+            if base_url is not None and api_key is not None and any(models.values()):
                 http = await exit_stack.enter_async_context(
                     httpx.AsyncClient(
-                        base_url=str(settings.nvidia_base_url),
+                        base_url=str(base_url),
                         headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
                         timeout=settings.timeout_seconds,
                         follow_redirects=False,
                         trust_env=False,
                     )
                 )
-                nvidia = Nvidia(
+                model_provider = OpenAICompatibleProvider(
                     http,
                     settings.timeout_seconds,
                     settings.max_retries,
                     settings.retry_delay_seconds,
                     settings.max_completion_tokens,
-                    settings.embedding_input_type,
+                    embedding_input_type,
+                    request_json_output=settings.provider == "openrouter",
                 )
             if settings.otlp_endpoint is not None:
                 provider = tracer_provider(
@@ -152,7 +156,7 @@ def create_app(settings: Settings) -> FastAPI:
                 exit_stack.push_async_callback(to_thread, provider.shutdown)
             yield {
                 "gateway": Gateway(
-                    provider=nvidia,
+                    provider=model_provider,
                     journal=journal,
                     cache=RedisCache(
                         client, settings.cache_ttl_seconds, settings.redis_timeout_seconds
@@ -161,7 +165,7 @@ def create_app(settings: Settings) -> FastAPI:
                     prompt_version=settings.prompt_version,
                     confidence_floor=settings.confidence_floor,
                     cache_namespace=(
-                        f"{settings.nvidia_base_url}|{settings.embedding_input_type}"
+                        f"{settings.provider}|{base_url}|{embedding_input_type}"
                         f"|{settings.max_completion_tokens}"
                     ),
                 )

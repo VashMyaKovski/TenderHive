@@ -9,6 +9,7 @@ from pydantic import (
     PostgresDsn,
     RedisDsn,
     SecretStr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -16,6 +17,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from modelgw.prompts import PROMPTS
 from modelgw.schemas import Identifier, Task
+
+_PROVIDER_ENDPOINTS = {
+    "nvidia_base_url": ("integrate.api.nvidia.com", "/v1"),
+    "openrouter_base_url": ("openrouter.ai", "/api/v1"),
+}
 
 
 class Settings(BaseSettings):
@@ -27,12 +33,28 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    nvidia_api_key: SecretStr | None = Field(validation_alias="NVIDIA_API_KEY")
-    nvidia_base_url: HttpUrl = Field(validation_alias="NVIDIA_BASE_URL")
-    chat_model: Identifier | None = Field(validation_alias="MODEL_RISK")
-    embeddings_model: Identifier | None = Field(validation_alias="MODEL_EMBEDDING")
-    vision_model: Identifier | None = Field(validation_alias="MODEL_VLM")
-    embedding_input_type: Literal["query", "passage"] | None
+    provider: Literal["openrouter", "nvidia"]
+    openrouter_api_key: SecretStr | None = Field(
+        default=None, validation_alias="OPENROUTER_API_KEY"
+    )
+    openrouter_base_url: HttpUrl | None = Field(
+        default=None, validation_alias="OPENROUTER_BASE_URL"
+    )
+    openrouter_chat_model: Identifier | None = Field(
+        default=None, validation_alias="OPENROUTER_MODEL_TEST"
+    )
+    openrouter_embeddings_model: Identifier | None = Field(
+        default=None, validation_alias="OPENROUTER_EMBEDDING_MODEL"
+    )
+    openrouter_vision_model: Identifier | None = Field(
+        default=None, validation_alias="OPENROUTER_VISION_MODEL"
+    )
+    nvidia_api_key: SecretStr | None = Field(default=None, validation_alias="NVIDIA_API_KEY")
+    nvidia_base_url: HttpUrl | None = Field(default=None, validation_alias="NVIDIA_BASE_URL")
+    chat_model: Identifier | None = Field(default=None, validation_alias="MODEL_RISK")
+    embeddings_model: Identifier | None = Field(default=None, validation_alias="MODEL_EMBEDDING")
+    vision_model: Identifier | None = Field(default=None, validation_alias="MODEL_VLM")
+    embedding_input_type: Literal["query", "passage"] | None = None
     prompt_version: Identifier = Field(
         validation_alias=AliasChoices("PROMPT_VERSION", "MODEL_GW_PROMPT_VERSION")
     )
@@ -62,32 +84,35 @@ class Settings(BaseSettings):
     bind_host: IPvAnyAddress
     port: Annotated[int, Field(ge=1, le=65535)]
 
-    @field_validator("nvidia_api_key")
+    @field_validator("nvidia_api_key", "openrouter_api_key")
     @classmethod
     def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
         if value is None:
             return None
         secret = value.get_secret_value()
-        if not secret or not secret.isascii() or any(char.isspace() for char in secret):
-            raise ValueError("NVIDIA API key must be a nonempty token")
+        if not secret or any(not 33 <= ord(char) <= 126 for char in secret):
+            raise ValueError("API key must be a nonempty token")
         return value
 
-    @field_validator("nvidia_base_url")
+    @field_validator("nvidia_base_url", "openrouter_base_url")
     @classmethod
-    def validate_provider_url(cls, value: HttpUrl) -> HttpUrl:
+    def validate_provider_url(cls, value: HttpUrl | None, info: ValidationInfo) -> HttpUrl | None:
+        if value is None:
+            return None
+        field = info.field_name
+        assert field is not None
+        host, path = _PROVIDER_ENDPOINTS[field]
         if (
             value.scheme != "https"
-            or value.host != "integrate.api.nvidia.com"
+            or value.host != host
             or value.port != 443
-            or value.path not in {"/v1", "/v1/"}
-            or value.username
-            or value.password
-            or value.query
-            or value.fragment
+            or value.path not in {path, f"{path}/"}
+            or value.username is not None
+            or value.password is not None
+            or value.query is not None
+            or value.fragment is not None
         ):
-            raise ValueError(
-                "expected NVIDIA's HTTPS inference API at integrate.api.nvidia.com/v1/"
-            )
+            raise ValueError(f"expected the HTTPS inference API at {host}{path}/")
         return value
 
     @field_validator("postgres_dsn")
@@ -124,6 +149,12 @@ class Settings(BaseSettings):
         "embeddings_model",
         "vision_model",
         "nvidia_api_key",
+        "nvidia_base_url",
+        "openrouter_api_key",
+        "openrouter_base_url",
+        "openrouter_chat_model",
+        "openrouter_embeddings_model",
+        "openrouter_vision_model",
         "masking_key",
         "embedding_input_type",
         "otlp_endpoint",
@@ -134,13 +165,15 @@ class Settings(BaseSettings):
         return None if value == "" else value
 
     @model_validator(mode="after")
-    def require_keys_for_models(self) -> Settings:
-        if any(self.models().values()) and (
-            self.nvidia_api_key is None or self.masking_key is None
-        ):
-            raise ValueError(
-                "NVIDIA_API_KEY and MODEL_GW_MASKING_KEY are required to enable a model"
-            )
+    def require_credentials_for_models(self) -> Settings:
+        if any(self.models().values()):
+            url, api_key = self.provider_connection()
+            if url is None or api_key is None or self.masking_key is None:
+                prefix = self.provider.upper()
+                raise ValueError(
+                    f"{prefix}_BASE_URL, {prefix}_API_KEY and MODEL_GW_MASKING_KEY "
+                    "are required to enable a model"
+                )
         return self
 
     @field_validator("prompt_version")
@@ -151,9 +184,21 @@ class Settings(BaseSettings):
         return version
 
     def models(self) -> dict[Task, str | None]:
+        if self.provider == "openrouter":
+            return {
+                "risk_assessment": self.openrouter_chat_model,
+                "document_draft": self.openrouter_chat_model,
+                "embeddings": self.openrouter_embeddings_model,
+                "vision": self.openrouter_vision_model,
+            }
         return {
             "risk_assessment": self.chat_model,
             "document_draft": self.chat_model,
             "embeddings": self.embeddings_model,
             "vision": self.vision_model,
         }
+
+    def provider_connection(self) -> tuple[HttpUrl | None, SecretStr | None]:
+        if self.provider == "openrouter":
+            return self.openrouter_base_url, self.openrouter_api_key
+        return self.nvidia_base_url, self.nvidia_api_key

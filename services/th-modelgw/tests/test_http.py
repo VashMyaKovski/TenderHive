@@ -2,7 +2,7 @@ import json
 import logging
 from asyncio import sleep
 from base64 import b64encode
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from io import BytesIO
 from uuid import UUID, uuid4
@@ -22,11 +22,12 @@ from modelgw.config import Settings
 from modelgw.context import Replacement
 from modelgw.errors import Failure, GatewayError
 from modelgw.journal import Invocation, InvocationResult
-from modelgw.nvidia import Nvidia
+from modelgw.provider import OpenAICompatibleProvider
 
 PATH = "/api/v1/inference"
 INVOKE_PATH = "/api/v1/invoke"
 SETTINGS = {
+    "provider": "nvidia",
     "NVIDIA_API_KEY": "synthetic-secret",
     "MODEL_RISK": "test/chat",
     "nvidia_base_url": "https://integrate.api.nvidia.com/v1/",
@@ -59,6 +60,14 @@ DISABLED_SETTINGS = {
     "embeddings_model": "",
     "vision_model": "",
     "masking_key": "",
+}
+OPENROUTER_SETTINGS = {
+    **SETTINGS,
+    "provider": "openrouter",
+    "OPENROUTER_API_KEY": "synthetic-openrouter-secret",
+    "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1/",
+    "OPENROUTER_MODEL_TEST": "test/chat",
+    "OPENROUTER_EMBEDDING_MODEL": "test/embedding",
 }
 
 
@@ -109,7 +118,15 @@ async def client_for(
         headers={"Authorization": f"Bearer {api_key.get_secret_value()}"},
     ) as upstream:
         service = Gateway(
-            Nvidia(upstream, 0.02, 2, 0.001, 256, settings.embedding_input_type),
+            OpenAICompatibleProvider(
+                upstream,
+                0.02,
+                2,
+                0.001,
+                256,
+                settings.embedding_input_type,
+                request_json_output=False,
+            ),
             cache,
             journal if journal is not None else MemoryJournal(),
             settings.models(),
@@ -179,7 +196,7 @@ async def test_disabled_model_server_starts_and_validates_without_provider(
     def unexpected_provider(*_: object) -> None:
         pytest.fail("a provider must not be created when the models are disabled")
 
-    monkeypatch.setattr("modelgw.api.Nvidia", unexpected_provider)
+    monkeypatch.setattr("modelgw.api.OpenAICompatibleProvider", unexpected_provider)
     settings = Settings.model_validate(DISABLED_SETTINGS)
     assert settings.nvidia_api_key is settings.masking_key is None
     assert all(model is None for model in settings.models().values())
@@ -220,6 +237,150 @@ def test_settings_limit_bearer_token_destination(url: str) -> None:
     with pytest.raises(ValidationError) as exc:
         Settings.model_validate({**SETTINGS, "nvidia_base_url": url})
     assert "password" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://integrate.api.nvidia.com/v1/",
+        "https://openrouter.ai.invalid.example/api/v1/",
+        "https://openrouter.ai:8443/api/v1/",
+        "http://openrouter.ai/api/v1/",
+        "https://user:password@openrouter.ai/api/v1/",
+        "https://openrouter.ai/v1/",
+        "https://openrouter.ai/api/v1/?key=value",
+        "https://openrouter.ai/api/v1/#fragment",
+    ],
+)
+def test_openrouter_rejects_unapproved_bearer_token_destinations(url: str) -> None:
+    with pytest.raises(ValidationError) as exc:
+        Settings.model_validate({**OPENROUTER_SETTINGS, "OPENROUTER_BASE_URL": url})
+    assert "password" not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("missing", "expected_error"),
+    [
+        ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),
+        ("OPENROUTER_BASE_URL", "OPENROUTER_BASE_URL"),
+        ("masking_key", "MODEL_GW_MASKING_KEY"),
+    ],
+)
+def test_openrouter_requires_its_own_credentials_and_endpoint(
+    missing: str, expected_error: str
+) -> None:
+    with pytest.raises(ValidationError, match=expected_error) as exc:
+        Settings.model_validate({**OPENROUTER_SETTINGS, missing: ""})
+    assert "synthetic-openrouter-secret" not in str(exc.value)
+    assert "synthetic-secret" not in str(exc.value)
+
+
+def test_openrouter_has_no_fallback_to_nvidia_models() -> None:
+    settings = Settings.model_validate(
+        {
+            **OPENROUTER_SETTINGS,
+            "OPENROUTER_MODEL_TEST": "",
+            "OPENROUTER_EMBEDDING_MODEL": "",
+            "vision_model": "test/vision",
+        }
+    )
+    assert all(model is None for model in settings.models().values())
+
+
+async def test_openrouter_lifespan_uses_distinct_cache_and_sends_only_masked_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = MemoryJournal()
+    cache = MemoryCache()
+    calls: list[tuple[str, str, str | None, dict[str, object]]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        assert request.url.host is not None
+        payload = json.loads(request.content)
+        calls.append(
+            (request.url.host, request.url.path, request.headers.get("Authorization"), payload)
+        )
+        assert "do-not-send@example.org" not in request.content.decode()
+        if request.url.path.endswith("/embeddings"):
+            return httpx.Response(
+                200, json={"model": "test/embedding", "data": [{"index": 0, "embedding": [0.2]}]}
+            )
+        return completion({"text": "Checklist", "confidence": 0.9})
+
+    async_client = httpx.AsyncClient
+
+    def mock_provider_client(
+        *,
+        base_url: str,
+        headers: dict[str, str],
+        timeout: float,
+        follow_redirects: bool,
+        trust_env: bool,
+    ) -> httpx.AsyncClient:
+        assert follow_redirects is trust_env is False
+        return async_client(
+            base_url=base_url,
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+            trust_env=trust_env,
+            transport=httpx.MockTransport(upstream),
+        )
+
+    monkeypatch.setattr("modelgw.api.journal_for", lambda _: journal)
+    monkeypatch.setattr("modelgw.api.RedisCache", lambda *_: cache)
+    monkeypatch.setattr("modelgw.api.httpx.AsyncClient", mock_provider_client)
+
+    trace_id = str(uuid4())
+    draft = {**body("document_draft", [PUBLIC_TEXT]), "trace_id": trace_id}
+
+    async def exercise_provider(provider_settings: Mapping[str, object]) -> None:
+        app = create_app(Settings.model_validate(provider_settings))
+        async with app.router.lifespan_context(app) as state:
+            assert state is not None
+            gateway = state["gateway"]
+            app.dependency_overrides[gateway_for] = lambda: gateway
+            async with async_client(
+                transport=httpx.ASGITransport(app=app), base_url="http://gateway.invalid"
+            ) as client:
+                response = await client.post(INVOKE_PATH, json=draft)
+                assert response.status_code == 200
+                assert response.headers["X-Trace-Id"] == trace_id
+                assert response.json()["cached"] is False
+                if provider_settings is OPENROUTER_SETTINGS:
+                    cached = await client.post(INVOKE_PATH, json=draft)
+                    embedded = await client.post(PATH, json=body("embeddings", [PUBLIC_TEXT]))
+                    assert cached.json()["cached"] is True
+                    assert embedded.status_code == 200
+                    assert embedded.json()["answer"]["vectors"] == [[0.2]]
+
+    await exercise_provider(SETTINGS)
+    await exercise_provider(OPENROUTER_SETTINGS)
+
+    nvidia_chat, openrouter_chat, openrouter_embeddings = calls
+    assert nvidia_chat[:3] == (
+        "integrate.api.nvidia.com",
+        "/v1/chat/completions",
+        "Bearer synthetic-secret",
+    )
+    assert "response_format" not in nvidia_chat[3]
+    assert openrouter_chat[:3] == (
+        "openrouter.ai",
+        "/api/v1/chat/completions",
+        "Bearer synthetic-openrouter-secret",
+    )
+    assert openrouter_chat[3]["response_format"] == {"type": "json_object"}
+    assert openrouter_embeddings[:3] == (
+        "openrouter.ai",
+        "/api/v1/embeddings",
+        "Bearer synthetic-openrouter-secret",
+    )
+    assert openrouter_embeddings[3]["model"] == "test/embedding"
+    assert "input_type" not in openrouter_embeddings[3]
+    assert len(cache.entries) == 3
+    assert str(journal.attempts[1][0].trace_id) == trace_id
+    assert journal.attempts[1][1]
+    assert journal.results[2].outcome == "ok"
 
 
 async def test_masking_precedes_provider_and_cached_hypothesis_rechecks_kb(
@@ -590,7 +751,9 @@ async def test_timeout_covers_the_entire_attempt() -> None:
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(upstream), base_url="https://nvidia.invalid"
     ) as client:
-        provider = Nvidia(client, 0.01, 0, 0.001, 256, None)
+        provider = OpenAICompatibleProvider(
+            client, 0.01, 0, 0.001, 256, None, request_json_output=False
+        )
         with pytest.raises(GatewayError) as exc:
             await provider.infer(ModelCall("document_draft", "test/chat", "JSON", ("text",), None))
 
