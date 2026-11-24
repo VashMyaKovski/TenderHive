@@ -8,10 +8,13 @@ services:
         condition: service_healthy
 
   th-kb:
-    environment:
+    environment: &demo-embedding
       KB_EMBEDDING_MODE: gateway
       KB_VECTOR_SIZE: "1536"
       KB_QDRANT_COLLECTION: th_kb_openrouter_demo
+
+  th-kb-migrate:
+    environment: *demo-embedding
 
   demo:
     profiles: ["demo"]
