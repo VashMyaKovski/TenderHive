@@ -1,0 +1,49 @@
+name: tenderhive-nvidia-demo
+
+services:
+  th-modelgw:
+    environment: &nvidia-model
+      MODEL_GW_PROVIDER: nvidia
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:?Set NVIDIA_API_KEY in the local environment}
+      MODEL_RISK: ${MODEL_RISK:?Set MODEL_RISK to the NVIDIA chat model}
+      MODEL_EMBEDDING: ${MODEL_EMBEDDING:?Set MODEL_EMBEDDING to the NVIDIA embedding model}
+      MODEL_GW_MASKING_KEY: ${MODEL_GW_MASKING_KEY:?Set MODEL_GW_MASKING_KEY in the local environment}
+      MODEL_GW_EMBEDDING_INPUT_TYPE: ${MODEL_GW_EMBEDDING_INPUT_TYPE-passage}
+      OPENROUTER_API_KEY: ""
+    ports: !override
+      - "127.0.0.1:${NVIDIA_DEMO_MODEL_GW_HOST_PORT:-18095}:${MODEL_GW_PORT:-8000}"
+
+  th-modelgw-migrate:
+    environment: *nvidia-model
+
+  th-kb:
+    environment: &nvidia-embedding
+      KB_EMBEDDING_MODE: gateway
+      KB_VECTOR_SIZE: ${NVIDIA_DEMO_VECTOR_SIZE:?Set NVIDIA_DEMO_VECTOR_SIZE to the NVIDIA embedding dimension}
+      KB_QDRANT_COLLECTION: th_kb_nvidia_demo
+    ports: !override
+      - "127.0.0.1:${NVIDIA_DEMO_KB_HOST_PORT:-18295}:${KB_PORT:-8000}"
+
+  th-kb-migrate:
+    environment: *nvidia-embedding
+
+  qdrant:
+    ports: !override
+      - "127.0.0.1:${NVIDIA_DEMO_QDRANT_HOST_PORT:-16345}:6333"
+
+  th-eval-api:
+    ports: !override
+      - "127.0.0.1:${NVIDIA_DEMO_EVAL_HOST_PORT:-18195}:${TH_EVAL_PORT:-8000}"
+
+  postgres:
+    ports: !reset []
+  neo4j:
+    ports: !reset []
+  redis:
+    ports: !reset []
+  kafka:
+    ports: !reset []
+  mail-sandbox:
+    ports: !reset []
+  th-integrations:
+    ports: !reset []
