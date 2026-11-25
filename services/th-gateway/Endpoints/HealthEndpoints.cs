@@ -17,9 +17,14 @@ public static class HealthEndpoints
                     options.TelegramEnabled ? "enabled" : "disabled")))
             .AllowAnonymous();
 
-        app.MapGet("/api/artifacts/{artifactId:guid}", async (Guid artifactId, long exp, string sig, ArtifactLinkService links, IJobStore store, IArtifactStorage storage, CancellationToken ct) =>
+        app.MapGet("/api/artifacts/{artifactId:guid}", async (Guid artifactId, long exp, string sig, string? format, ArtifactLinkService links, ArtifactExporter exporter, IJobStore store, IArtifactStorage storage, CancellationToken ct) =>
             {
-                if (!links.Validate(artifactId, exp, sig))
+                if (!ArtifactFormats.TryNormalize(format, out var normalized))
+                {
+                    throw new ApiException(400, "Допустимые форматы выдачи артефакта: original, docx, pdf, xlsx.");
+                }
+
+                if (!links.Validate(artifactId, exp, normalized, sig))
                 {
                     throw new ApiException(403, "Ссылка на файл недействительна или истекла: запросите новую в дашборде.");
                 }
@@ -29,7 +34,13 @@ public static class HealthEndpoints
                 var content = storage.Read(artifact.StoragePath)
                     ?? throw new ApiException(404, "Файл артефакта отсутствует в хранилище.");
 
-                return Results.File(content, artifact.ContentType, artifact.FileName);
+                if (normalized == ArtifactFormats.Original || !ArtifactFormats.TryParse(normalized, out var target))
+                {
+                    return Results.File(content, artifact.ContentType, artifact.FileName);
+                }
+
+                var export = exporter.Export(artifact, content, target);
+                return Results.File(export.Content, export.ContentType, export.FileName);
             })
             .AllowAnonymous();
 

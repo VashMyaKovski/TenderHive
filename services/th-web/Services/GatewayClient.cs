@@ -66,8 +66,11 @@ public sealed class GatewayClient
     public Task<List<ArtifactDto>> GetArtifactsAsync(Guid jobId) =>
         SendAsync<List<ArtifactDto>>(HttpMethod.Get, $"api/jobs/{jobId}/artifacts", null);
 
-    public Task<ArtifactLinkDto> GetArtifactLinkAsync(Guid jobId, Guid artifactId) =>
-        SendAsync<ArtifactLinkDto>(HttpMethod.Get, $"api/jobs/{jobId}/artifacts/{artifactId}/link", null);
+    public Task<ArtifactLinkDto> GetArtifactLinkAsync(Guid jobId, Guid artifactId, string? format = null) =>
+        SendAsync<ArtifactLinkDto>(
+            HttpMethod.Get,
+            $"api/jobs/{jobId}/artifacts/{artifactId}/link" + (string.IsNullOrWhiteSpace(format) ? string.Empty : $"?format={format}"),
+            null);
 
     public Task<List<HumanDecisionDto>> GetDecisionsAsync(Guid jobId) =>
         SendAsync<List<HumanDecisionDto>>(HttpMethod.Get, $"api/jobs/{jobId}/decisions", null);

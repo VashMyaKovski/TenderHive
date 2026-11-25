@@ -403,7 +403,7 @@ public sealed class JobService
         return artifacts.Select(ToDto).ToList();
     }
 
-    public async Task<ArtifactLinkDto> GetArtifactLinkAsync(Guid jobId, Guid artifactId, ArtifactLinkService links, CancellationToken ct)
+    public async Task<ArtifactLinkDto> GetArtifactLinkAsync(Guid jobId, Guid artifactId, string? format, ArtifactLinkService links, CancellationToken ct)
     {
         var artifact = await _store.GetArtifactAsync(artifactId, ct) ?? throw new ApiException(404, "Артефакт не найден.");
         if (artifact.JobId != jobId)
@@ -411,7 +411,12 @@ public sealed class JobService
             throw new ApiException(404, "Артефакт не принадлежит указанному заданию.");
         }
 
-        var url = links.Create(artifactId, out var expiresAt);
+        if (!ArtifactFormats.TryNormalize(format, out var normalized))
+        {
+            throw new ApiException(400, "Допустимые форматы выдачи артефакта: original, docx, pdf, xlsx.");
+        }
+
+        var url = links.Create(artifactId, normalized, out var expiresAt);
         return new ArtifactLinkDto(url, expiresAt);
     }
 

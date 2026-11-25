@@ -13,7 +13,8 @@ public interface ITelegramClient
 
     Task SendMessageAsync(long chatId, string text, CancellationToken ct);
 
-    Task SendDocumentAsync(long chatId, string fileName, byte[] content, string caption, CancellationToken ct);
+    /// <returns><c>true</c>, если Bot API подтвердил отправку файла.</returns>
+    Task<bool> SendDocumentAsync(long chatId, string fileName, byte[] content, string caption, CancellationToken ct);
 
     Task<byte[]?> DownloadFileAsync(string fileId, CancellationToken ct);
 }
@@ -61,7 +62,7 @@ public sealed class TelegramClient : ITelegramClient
         }
     }
 
-    public async Task SendDocumentAsync(long chatId, string fileName, byte[] content, string caption, CancellationToken ct)
+    public async Task<bool> SendDocumentAsync(long chatId, string fileName, byte[] content, string caption, CancellationToken ct)
     {
         using var form = new MultipartFormDataContent();
         form.Add(new StringContent(chatId.ToString()), "chat_id");
@@ -75,11 +76,14 @@ public sealed class TelegramClient : ITelegramClient
         form.Add(file, "document", fileName);
 
         using var response = await _http.PostAsync(Method("sendDocument"), form, ct);
-        if (!response.IsSuccessStatusCode)
+        if (response.IsSuccessStatusCode)
         {
-            var body = await response.Content.ReadAsStringAsync(ct);
-            _logger.LogWarning("sendDocument вернул код {StatusCode}: {Body}", (int)response.StatusCode, body);
+            return true;
         }
+
+        var body = await response.Content.ReadAsStringAsync(ct);
+        _logger.LogWarning("sendDocument вернул код {StatusCode}: {Body}", (int)response.StatusCode, body);
+        return false;
     }
 
     public async Task<byte[]?> DownloadFileAsync(string fileId, CancellationToken ct)

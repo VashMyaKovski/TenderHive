@@ -18,7 +18,9 @@ REST API для оркестратора и дашборда, авторизац
 | `Outbox/` | транзакционный outbox и публикация событий в Kafka |
 | `Hitl/` | контроль сроков карточек согласования |
 | `Telegram/` | бот, приём файлов и отправка артефактов |
-| `demo/flow.sh` | сквозная проверка критериев готовности через REST API (23 проверки) |
+| `Assets/` | шрифт с кириллицей для экспорта PDF (Roboto, Apache 2.0) |
+| `tests/` | автотесты: идемпотентность, правила остановки, неизменяемость карточки, экспорт форматов |
+| `demo/flow.sh` | сквозная проверка критериев готовности через REST API (25 проверок) |
 | `demo/timeout.sh` | проверка таймаута карточки и передачи её руководителю |
 
 ## 2. Запуск
@@ -54,6 +56,7 @@ dotnet run --project services/th-web         # http://127.0.0.1:8081
 
 ```sh
 dotnet build                                  # весь solution, 0 предупреждений
+dotnet test services/th-gateway/tests/TenderHive.Gateway.Tests.csproj
 bash services/th-gateway/demo/flow.sh         # сквозной сценарий, запускать из корня репозитория
 ```
 
@@ -100,7 +103,7 @@ bash services/th-gateway/demo/timeout.sh
 | `GET` | `/api/jobs/{jobId}` | статус задания и шаги обработки |
 | `GET` | `/api/jobs/{jobId}/result` | результат решения |
 | `GET` | `/api/jobs/{jobId}/artifacts` | артефакты с версиями |
-| `GET` | `/api/jobs/{jobId}/artifacts/{artifactId}/link` | подписанная ссылка на файл |
+| `GET` | `/api/jobs/{jobId}/artifacts/{artifactId}/link` | подписанная ссылка на файл; `?format=docx\|pdf\|xlsx` — выдача в нужном формате |
 | `GET` | `/api/jobs/{jobId}/decisions` | карточки согласования задания |
 | `GET` | `/api/jobs/{jobId}/audit` | журнал аудита задания |
 | `POST` | `/api/jobs/{jobId}/result` | приём результата оркестратора (multipart: часть `result` и файлы) |
@@ -130,6 +133,14 @@ bash services/th-gateway/demo/timeout.sh
 Событие пишется в `outbox_events` в одной транзакции с изменением состояния задания,
 публикуется фоновой службой и помечается опубликованным только после подтверждения
 брокера: падение сервиса не теряет событие. Ключ партиционирования — `job_id`.
+
+### Форматы артефактов
+
+Документы отдаются в DOCX и PDF, расчёт — в XLSX (`Services/ArtifactExporter.cs`).
+Текст и Markdown превращаются в DOCX и PDF, CSV — в XLSX; готовый PDF передаётся как есть.
+Формат входит в подпись ссылки, поэтому его нельзя подменить в адресе; недопустимый
+формат отклоняется с кодом `400`. Тем же экспортом пользуется выдача файлов в Telegram:
+документы уходят двумя файлами (DOCX и PDF), смета — книгой XLSX.
 
 ## 5. Контур согласования
 
@@ -163,5 +174,5 @@ bash services/th-gateway/demo/timeout.sh
 | карточка неизменяема, повторное решение отклоняется | `PostgresJobStore.ApplyDecisionAsync` (`update ... where decision = 'pending'`), ответ `409` |
 | таймаут передаёт задание руководителю без автосогласия | `Hitl/DecisionTimeoutService.cs` |
 | дашборд не обходит остановку | `th-web` работает только через API шлюза; кнопки «согласовать» и «отклонить» |
-| артефакты выдаются файлами в Telegram | `Telegram/ArtifactNotifier.cs` |
+| артефакты выдаются файлами в Telegram | `Telegram/ArtifactNotifier.cs`, `Services/ArtifactExporter.cs` (DOCX, PDF, XLSX) |
 | аудит решений | `audit_entries`, `GET /api/jobs/{jobId}/audit` |

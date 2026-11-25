@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/services/th-gateway/">
     <Project Path="services/th-gateway/TenderHive.Gateway.csproj" />
+    <Project Path="services/th-gateway/tests/TenderHive.Gateway.Tests.csproj" />
   </Folder>
   <Folder Name="/services/th-web/">
     <Project Path="services/th-web/TenderHive.Web.csproj" />

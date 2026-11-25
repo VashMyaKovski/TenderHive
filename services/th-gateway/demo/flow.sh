@@ -192,7 +192,17 @@ BYTES="$(curl -fsS "$LINK" | wc -c)"
 if [ "$BYTES" -gt 0 ]; then PASS=$((PASS+1)); printf '  ok   файл по подписанной ссылке (%s байт)\n' "$BYTES";
 else FAIL=$((FAIL+1)); printf '  FAIL подписанная ссылка вернула пустой файл\n'; fi
 
-printf '== 11. База знаний: активация и откат\n'
+printf '== 11. Экспорт артефактов в DOCX, PDF и XLSX\n'
+for fmt in docx pdf xlsx; do
+  EXPORT_LINK="$(curl -fsS "$BASE/api/jobs/$JOB/artifacts/$ARTIFACT/link?format=$fmt" -H "Authorization: Bearer $SPECIALIST" | field url)"
+  curl -fsS "$EXPORT_LINK" -o "$WORK/export.$fmt"
+done
+MAGIC="$(python -c "import pathlib,sys;w=pathlib.Path(sys.argv[1]);print('ok' if w.joinpath('export.docx').read_bytes()[:2]==b'PK' and w.joinpath('export.xlsx').read_bytes()[:2]==b'PK' and w.joinpath('export.pdf').read_bytes()[:4]==b'%PDF' else 'bad')" "$WORK")"
+check "артефакт выдан в DOCX, PDF и XLSX" "ok" "$MAGIC"
+check "недопустимый формат выдачи отклонён" "400" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/jobs/$JOB/artifacts/$ARTIFACT/link?format=doc" -H "Authorization: Bearer $SPECIALIST")"
+
+printf '== 12. База знаний: активация и откат\n'
 curl -fsS "$BASE/api/kb/versions" -H "Authorization: Bearer $KBADMIN" -o "$WORK/kb.json"
 code_activate() { post_json "$BASE/api/kb/versions/$1/activate" "$2" "$WORK/kb.json"; }
 check "откат на предыдущую версию" "200" "$(code_activate kb-2026.10.1 "$KBADMIN")"

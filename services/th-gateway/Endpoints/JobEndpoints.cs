@@ -38,8 +38,8 @@ public static class JobEndpoints
                 Results.Ok(await service.ListArtifactsAsync(jobId, ct)))
             .RequireAuthorization();
 
-        jobs.MapGet("/{jobId:guid}/artifacts/{artifactId:guid}/link", async (Guid jobId, Guid artifactId, JobService service, ArtifactLinkService links, CancellationToken ct) =>
-                Results.Ok(await service.GetArtifactLinkAsync(jobId, artifactId, links, ct)))
+        jobs.MapGet("/{jobId:guid}/artifacts/{artifactId:guid}/link", async (Guid jobId, Guid artifactId, string? format, JobService service, ArtifactLinkService links, CancellationToken ct) =>
+                Results.Ok(await service.GetArtifactLinkAsync(jobId, artifactId, format, links, ct)))
             .RequireAuthorization();
 
         jobs.MapGet("/{jobId:guid}/decisions", async (Guid jobId, JobService service, CancellationToken ct) =>

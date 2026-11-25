@@ -1,25 +1,35 @@
 using TenderHive.Contracts;
 using TenderHive.Gateway.Configuration;
+using TenderHive.Gateway.Services;
 using TenderHive.Gateway.Storage;
 
 namespace TenderHive.Gateway.Telegram;
 
 /// <summary>
-/// Выдача артефактов файлами в Telegram. Отметка о выдаче ставится только после успешной отправки,
-/// поэтому незавершённая выдача повторяется на следующем проходе.
+/// Выдача артефактов файлами в Telegram: документы уходят в DOCX и PDF, расчёт — в XLSX.
+/// Отметка о выдаче ставится только после успешной отправки каждого файла, поэтому
+/// незавершённая выдача повторяется на следующем проходе.
 /// </summary>
 public sealed class ArtifactNotifier : BackgroundService
 {
     private readonly IJobStore _store;
     private readonly IArtifactStorage _storage;
+    private readonly ArtifactExporter _exporter;
     private readonly ITelegramClient _client;
     private readonly GatewayOptions _options;
     private readonly ILogger<ArtifactNotifier> _logger;
 
-    public ArtifactNotifier(IJobStore store, IArtifactStorage storage, ITelegramClient client, GatewayOptions options, ILogger<ArtifactNotifier> logger)
+    public ArtifactNotifier(
+        IJobStore store,
+        IArtifactStorage storage,
+        ArtifactExporter exporter,
+        ITelegramClient client,
+        GatewayOptions options,
+        ILogger<ArtifactNotifier> logger)
     {
         _store = store;
         _storage = storage;
+        _exporter = exporter;
         _client = client;
         _options = options;
         _logger = logger;
@@ -90,9 +100,26 @@ public sealed class ArtifactNotifier : BackgroundService
                     continue;
                 }
 
-                var extension = Path.GetExtension(artifact.FileName);
-                var fileName = $"tenderhive-{artifact.Kind}-v{artifact.Version}{extension}";
-                await _client.SendDocumentAsync(chatId, fileName, content, $"{artifact.Kind}, версия {artifact.Version}, {job.JobId}", ct);
+                foreach (var format in ArtifactFormats.DeliveryPlan(artifact))
+                {
+                    ArtifactExport export;
+                    try
+                    {
+                        export = _exporter.Export(artifact, content, format);
+                    }
+                    catch (Exception exception)
+                    {
+                        _logger.LogError(exception, "Не удалось подготовить {Format} для артефакта {ArtifactId}", format, artifact.ArtifactId);
+                        delivered = false;
+                        continue;
+                    }
+
+                    var caption = $"{artifact.Kind}, {ArtifactFormats.Extension(format)}, версия {artifact.Version}, {job.JobId}";
+                    if (!await _client.SendDocumentAsync(chatId, export.FileName, export.Content, caption, ct))
+                    {
+                        delivered = false;
+                    }
+                }
             }
 
             if (delivered)

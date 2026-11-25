@@ -159,11 +159,17 @@
                         <td>v@artifact.Version</td>
                         <td>@DisplayText.Bytes(artifact.Size)</td>
                         <td>@DisplayText.Utc(artifact.CreatedAt)</td>
-                        <td><button class="link" @onclick="() => DownloadAsync(artifact)">Скачать</button></td>
+                        <td class="downloads">
+                            <button class="link" @onclick="() => DownloadAsync(artifact, null)">Скачать</button>
+                            <button class="link" @onclick="() => DownloadAsync(artifact, DocxFormat)">DOCX</button>
+                            <button class="link" @onclick="() => DownloadAsync(artifact, PdfFormat)">PDF</button>
+                            <button class="link" @onclick="() => DownloadAsync(artifact, XlsxFormat)">XLSX</button>
+                        </td>
                     </tr>
                 }
                 </tbody>
             </table>
+            <p class="muted">Документы выдаются в DOCX и PDF, расчёт — в XLSX; исходный файл доступен кнопкой «Скачать».</p>
         }
     </section>
 
@@ -238,6 +244,10 @@
 }
 
 @code {
+    private const string DocxFormat = "docx";
+    private const string PdfFormat = "pdf";
+    private const string XlsxFormat = "xlsx";
+
     [Parameter]
     public Guid JobId { get; set; }
 
@@ -280,12 +290,12 @@
         }
     }
 
-    private async Task DownloadAsync(ArtifactDto artifact)
+    private async Task DownloadAsync(ArtifactDto artifact, string? format)
     {
         error = null;
         try
         {
-            var link = await Gateway.GetArtifactLinkAsync(JobId, artifact.ArtifactId);
+            var link = await Gateway.GetArtifactLinkAsync(JobId, artifact.ArtifactId, format);
             Navigation.NavigateTo(link.Url, forceLoad: true);
         }
         catch (GatewayException exception)

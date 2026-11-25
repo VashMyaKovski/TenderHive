@@ -30,6 +30,7 @@ builder.Services.AddSingleton<IJobStore>(_ => StoreFactory.Create(options));
 builder.Services.AddSingleton<PasswordHasher>();
 builder.Services.AddSingleton<TokenService>();
 builder.Services.AddSingleton<ArtifactLinkService>();
+builder.Services.AddSingleton<ArtifactExporter>();
 builder.Services.AddSingleton<JobService>();
 builder.Services.AddSingleton<ITelegramClient, TelegramClient>();
 
