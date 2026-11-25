@@ -208,7 +208,7 @@ services:
 
   kafka-init:
     image: apache/kafka:4.1.2
-    profiles: ["setup", "orchestrator"]
+    profiles: ["setup", "orchestrator", "integrations"]
     depends_on:
       kafka:
         condition: service_healthy
@@ -300,6 +300,58 @@ services:
       - ./infra/monitoring/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/tenderhive.yaml:ro
       - ./infra/monitoring/dashboards:/var/lib/grafana/dashboards/tenderhive:ro
     ports: ["127.0.0.1:${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in .env}:3000"]
+
+  mail-sandbox:
+    image: greenmail/standalone:2.1.8
+    profiles: ["integrations"]
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap
+        -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users.login=email
+        -Dgreenmail.users=demo:demo-mail-only@example.test
+    ports:
+      - "127.0.0.1:${TH_INTEGRATIONS_SMTP_HOST_PORT:-3025}:3025"
+
+  th-integrations-migrate:
+    profiles: ["integrations"]
+    build:
+      context: .
+      dockerfile: services/th-integrations/Dockerfile
+    env_file:
+      - ./services/th-integrations/.env.example
+      - path: ./services/th-integrations/.env
+        required: false
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  th-integrations:
+    profiles: ["integrations"]
+    build:
+      context: .
+      dockerfile: services/th-integrations/Dockerfile
+    env_file:
+      - ./services/th-integrations/.env.example
+      - path: ./services/th-integrations/.env
+        required: false
+    ports:
+      - "127.0.0.1:${TH_INTEGRATIONS_HOST_PORT:-8003}:${TH_INTEGRATIONS_PORT:-8000}"
+    depends_on:
+      th-integrations-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      mail-sandbox:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-m", "tender_integrations", "healthcheck"]
+      interval: 5s
+      timeout: 8s
+      retries: 10
+      start_period: 5s
 
 volumes:
   postgres:
