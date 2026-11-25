@@ -40,7 +40,7 @@ docker compose @workbench run --build --rm demo --seed-kb
 
 ## Дашборд Blazor на Windows
 
-Из корня ветки `feat/web-demo-dashboard` запустите Docker Desktop и выполните:
+Из корня проекта запустите Docker Desktop и выполните:
 
 ~~~powershell
 .\Start-TenderHive.ps1
@@ -48,10 +48,14 @@ docker compose @workbench run --build --rm demo --seed-kb
 
 При ограничениях PowerShell используйте `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-TenderHive.ps1`. Настройки OpenRouter берутся из `.env` этой папки или основной рабочей копии Git. Путь можно задать через `-EnvFile`. Стандартный адрес — [http://127.0.0.1:8081/](http://127.0.0.1:8081/), для другого порта используйте `-Port`. Остановка без удаления томов — `.\Start-TenderHive.ps1 -Stop`.
 
+По умолчанию Compose использует проект `tenderhive-dev`. Ранее выпущенный дашборд использует проект `tenderhive-dashboard` со своей историей миграций и томами. Чтобы освободить порт `8081`, остановите старый проект командой `.\Start-TenderHive.ps1 -ProjectName tenderhive-dashboard -Stop`.
+
+Для проверки второй ветки рядом с работающим дашбордом задайте отдельный проект и порт, например `.\Start-TenderHive.ps1 -ProjectName tenderhive-reconcile -Port 8082`. Compose создаст отдельные контейнеры, тома и локальные учётные данные. При остановке передайте тот же `-ProjectName`.
+
 Вход под `specialist` открывает создание прогона. Кнопкой «Заполнить пример» загрузите пример или приложите PDF/TXT. Укажите нормализованные параметры и общедоступный фрагмент для оценки. Используйте аккаунт роли из карточки, например `lawyer` для риска, затем `specialist` для итогового утверждения. После утверждения скачайте комплект из результата. Пароль локальных аккаунтов создаётся скриптом при первом запуске. Следующая команда показывает только пароль для входа.
 
 ~~~powershell
-Get-Content "$env:LOCALAPPDATA/TenderHive/dashboard/local.env" |
+Get-Content "$env:LOCALAPPDATA/TenderHive/dashboard/tenderhive-dev/local.env" |
     Where-Object { $_ -like 'DASH_DEMO_PASSWORD=*' } |
     ForEach-Object { ($_ -split '=', 2)[1] }
 ~~~

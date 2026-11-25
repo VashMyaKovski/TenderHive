@@ -72,6 +72,7 @@ def test_risk_requires_a_single_rules_snapshot_and_fact() -> None:
         ("0.15", "0.15", "high", 0.9, 0.9, "penalty_above_threshold"),
         ("0.1", "0.1", "low", 0.4, 0.4, "unclear_requirements"),
         ("0.1", "0.1", "low", 0.8, 0.8, None),
+        ("0.05", "0.05", "high", 0.9, 0.9, "unclear_requirements"),
     ],
 )
 def test_authoritative_rule_and_human_review(

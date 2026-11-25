@@ -2,12 +2,16 @@ param(
     [string]$EnvFile,
     [ValidateRange(1, 65535)]
     [int]$Port = 8081,
+    [ValidatePattern('^[a-z0-9][a-z0-9_-]*$')]
+    [string]$ProjectName = 'tenderhive-dev',
     [switch]$Stop
 )
 
 $ErrorActionPreference = 'Stop'
-$tenderProjectName = 'tenderhive-dashboard'
 $tenderRuntimeDirectory = Join-Path $env:LOCALAPPDATA 'TenderHive/dashboard'
+if ($ProjectName -ne 'tenderhive-dashboard') {
+    $tenderRuntimeDirectory = Join-Path $tenderRuntimeDirectory $ProjectName
+}
 $tenderRuntimeEnv = Join-Path $tenderRuntimeDirectory 'local.env'
 
 function New-LocalSecret([int]$ByteCount) {
@@ -59,7 +63,7 @@ try {
         [IO.File]::WriteAllLines($tenderRuntimeEnv, $settings, [Text.UTF8Encoding]::new($false))
     }
     $compose = @(
-        '-p', $tenderProjectName,
+        '-p', $ProjectName,
         '--env-file', '.env.example', '--env-file', $EnvFile, '--env-file', $tenderRuntimeEnv,
         '-f', 'compose.yaml', '-f', 'infra/demo/compose.yaml',
         '-f', 'infra/demo/web.compose.yaml', '-f', 'infra/demo/dashboard.compose.yaml',
@@ -87,7 +91,7 @@ try {
     docker compose @compose config --quiet
     Assert-DockerResult 'Compose configuration is invalid.'
 
-    $ownedPorts = docker ps --filter "label=com.docker.compose.project=$tenderProjectName" --filter 'label=com.docker.compose.service=th-web' --format '{{.Ports}}'
+    $ownedPorts = docker ps --filter "label=com.docker.compose.project=$ProjectName" --filter 'label=com.docker.compose.service=th-web' --format '{{.Ports}}'
     Assert-DockerResult 'Could not check existing containers.'
     $bindingPattern = '127\.0\.0\.1:' + $Port + '->'
     if (!(($ownedPorts -join ' ') -match $bindingPattern)) {
@@ -111,12 +115,12 @@ try {
         $seedOutput | ForEach-Object { Write-Host $_ }
         if ($seedResult -eq 0) { break }
         if ($seedAttempt -eq 3 -or ($seedOutput -join "`n") -notmatch 'HTTP 503 /api/v1/versions') {
-            throw 'Knowledge seed failed. Check docker logs tenderhive-dashboard-th-kb-1 and docker logs tenderhive-dashboard-th-modelgw-1.'
+            throw "Knowledge seed failed. Check docker logs $ProjectName-th-kb-1 and docker logs $ProjectName-th-modelgw-1."
         }
         Start-Sleep -Seconds 5
     }
     docker compose @compose up --build --no-deps --wait --wait-timeout 120 th-gateway th-web
-    Assert-DockerResult 'Dashboard startup failed. Check docker logs tenderhive-dashboard-th-gateway-1 and docker logs tenderhive-dashboard-th-web-1.'
+    Assert-DockerResult "Dashboard startup failed. Check docker logs $ProjectName-th-gateway-1 and docker logs $ProjectName-th-web-1."
 
     $url = "http://127.0.0.1:$Port"
     $health = $null
@@ -128,7 +132,7 @@ try {
         catch { Start-Sleep -Seconds 1 }
     }
     if ($null -eq $health -or $health.StatusCode -ne 200) {
-        throw 'Dashboard health check failed. Check docker logs tenderhive-dashboard-th-web-1.'
+        throw "Dashboard health check failed. Check docker logs $ProjectName-th-web-1."
     }
     Write-Host "TenderHive: $url/"
     Write-Host 'Demo logins: specialist, lawyer, procurement, head, kbadmin.'

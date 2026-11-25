@@ -6,6 +6,8 @@ TenderHive помогает готовить проекты предложени
 
 ## Локальный запуск
 
+Для запуска Blazor на Windows откройте Docker Desktop, настройте OpenRouter в корневом `.env` и выполните `./Start-TenderHive.ps1` в PowerShell. Дашборд откроется на [http://127.0.0.1:8081/](http://127.0.0.1:8081/). Настройки, учётные записи для согласования и отдельный запуск для проверки ветки описаны в [инструкции стенда](infra/demo/README.md).
+
 Нужны Python 3.14, `uv` и Docker с Compose. Для корневых проверок достаточно Python и `uv`.
 
 ```sh
@@ -20,7 +22,7 @@ docker compose run --rm kafka-init
 docker compose ps
 ```
 
-`kafka-init` создаёт пять тем из [контракта Kafka](contracts/README.md). Команду можно запускать повторно. Для модельного шлюза NVIDIA используйте профиль `modelgw` и [инструкцию сервиса](services/th-modelgw/README.md).
+`kafka-init` создаёт темы из [контракта Kafka](contracts/README.md). Команду можно запускать повторно. Дашборд использует OpenRouter через `th-modelgw`. Подробные настройки шлюза приведены в [инструкции сервиса](services/th-modelgw/README.md).
 
 Контролируемый регрессионный прогон `th-eval` запускается командой `docker compose --env-file .env.example run --build --rm th-eval`. Для API с сохранением прогонов в PostgreSQL запустите `docker compose --env-file .env.example up --build --wait th-eval-api`. С хоста API доступен на `http://127.0.0.1:8002`. Настройки, формат отчётов и сравнение версий описаны в [документации модуля](services/th-eval/README.md).
 

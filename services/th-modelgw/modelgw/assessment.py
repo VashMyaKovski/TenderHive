@@ -18,7 +18,7 @@ def assess_risk(
     human_reason: Literal["penalty_above_threshold", "unclear_requirements"] | None = None
     if threshold_exceeded:
         human_reason = "penalty_above_threshold"
-    elif confidence < confidence_floor:
+    elif hypothesis.risk_level == "high" or confidence < confidence_floor:
         human_reason = "unclear_requirements"
 
     return (
