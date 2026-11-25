@@ -23,15 +23,13 @@ builder.Services.AddSingleton(options);
 builder.Services.AddHttpClient();
 if (workbench is not null)
 {
-    builder.Services.AddHttpClient(DemoWorkbenchClient.ClientName, client =>
+    builder.Services.AddHttpClient<DemoWorkbenchClient>(client =>
     {
         client.BaseAddress = workbench.Origin;
         client.DefaultRequestHeaders.Add("X-Workbench-Token", workbench.Token);
         client.MaxResponseContentBufferSize = DemoWorkbenchClient.MaxResponseBytes;
     }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
     builder.Services.AddSingleton(new DemoRunRegistry(workbench.GrantsFile));
-    builder.Services.AddScoped(services => new DemoWorkbenchClient(
-        services.GetRequiredService<IHttpClientFactory>().CreateClient(DemoWorkbenchClient.ClientName)));
     builder.Services.AddScoped<DemoRuns>();
 }
 builder.Services.ConfigureHttpJsonOptions(http =>

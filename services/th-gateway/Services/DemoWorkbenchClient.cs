@@ -10,7 +10,6 @@ public sealed record DemoDownload(byte[] Bytes, string ContentType, string Sha25
 
 public sealed class DemoWorkbenchClient(HttpClient http)
 {
-    public const string ClientName = "demo-workbench";
     public const long MaxResponseBytes = 8 * 1024 * 1024;
 
     public static string? ArtifactContentType(string name) => name switch
