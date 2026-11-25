@@ -2,9 +2,6 @@ import logging
 import sys
 from http.client import HTTPConnection
 
-import uvicorn
-
-from tender_agents.api import create_app
 from tender_agents.config import Settings
 
 
@@ -24,6 +21,11 @@ def main() -> None:
         finally:
             connection.close()
         return
+
+    import uvicorn
+
+    from tender_agents.api import create_app
+
     # The SDK's own diagnostic logs can include A2A payloads and parser exceptions.
     sdk_logs = logging.getLogger("a2a")
     sdk_logs.addHandler(logging.NullHandler())

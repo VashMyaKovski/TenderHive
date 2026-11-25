@@ -33,6 +33,10 @@ type FailureCode = Literal[
     "task_in_progress",
     "task_store_unavailable",
     "role_unavailable",
+    "document_unauthorized",
+    "approval_required",
+    "artifact_storage_unavailable",
+    "artifact_generation_failed",
 ]
 
 _DECIMAL = r"^(?:(?:0|[1-9][0-9]?)(?:\.[0-9]{1,6})?|100(?:\.0{1,6})?)$"

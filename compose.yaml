@@ -149,9 +149,13 @@ services:
       - ./services/th-agents/.env.example
       - path: ./services/th-agents/.env
         required: false
+    volumes:
+      - agents-artifacts:/var/lib/tenderhive/artifacts
     depends_on:
       redis:
         condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "tender_agents", "healthcheck"]
       interval: 5s
@@ -208,7 +212,7 @@ services:
 
   kafka-init:
     image: apache/kafka:4.1.2
-    profiles: ["setup", "orchestrator", "integrations"]
+    profiles: ["setup", "orchestrator", "integrations", "agents"]
     depends_on:
       kafka:
         condition: service_healthy
@@ -393,3 +397,4 @@ volumes:
   qdrant:
   kafka:
   eval_reports:
+  agents-artifacts:

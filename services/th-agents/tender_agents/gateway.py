@@ -53,6 +53,7 @@ _RETRYABLE = frozenset(
         "provider_timeout",
         "task_in_progress",
         "task_store_unavailable",
+        "artifact_storage_unavailable",
     }
 )
 
