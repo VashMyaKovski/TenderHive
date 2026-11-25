@@ -51,12 +51,13 @@ def _matches(actual: Scalar, condition: Condition) -> bool:
 
 def _check_resources(
     positions: list[Position],
-) -> tuple[list[ResourceCheck], Decimal, bool]:
+) -> tuple[list[ResourceCheck], list[Decimal], bool]:
     resources: list[ResourceCheck] = []
-    additional_cost = Decimal(0)
+    costs: list[Decimal] = []
     confirmation_failed = False
     for position in positions:
         available = position.available
+        cost = position.quantity * position.unit_cost
         confirmation = position.supply_confirmation
         if (
             confirmation is not None
@@ -64,7 +65,8 @@ def _check_resources(
             and confirmation.delivery_date <= position.supply_deadline.date()
         ):
             available += confirmation.quantity
-            additional_cost += confirmation.additional_cost
+            cost += confirmation.additional_cost
+        costs.append(cost)
         shortage = max(position.quantity - available, Decimal(0))
         if shortage and confirmation is not None:
             confirmation_failed = True
@@ -77,7 +79,7 @@ def _check_resources(
                 alternatives=position.alternatives,
             )
         )
-    return resources, additional_cost, confirmation_failed
+    return resources, costs, confirmation_failed
 
 
 def solve(
@@ -193,7 +195,7 @@ def solve(
             trace.append(entry)
 
     positions = request.profile.positions
-    resources, additional_cost, confirmation_failed = _check_resources(positions)
+    resources, costs, confirmation_failed = _check_resources(positions)
     shortage = any(not row.covered for row in resources)
     if confirmation_failed:
         reasons.add("NO_SOLUTION")
@@ -208,13 +210,16 @@ def solve(
         ),
         Decimal(0),
     )
-    cost = sum((position.quantity * position.unit_cost for position in positions), additional_cost)
+    cost = sum(costs, Decimal(0))
     loss_making = cost > offer
     estimate: Estimate | EmptyResultPart = EmptyResultPart()
     if offer:
         margin_numerator = (offer - cost) * 100
         estimate = Estimate(
-            positions=[position.model_dump(mode="json") for position in positions],
+            positions=[
+                {**position.model_dump(mode="json"), "cost": str(row_cost)}
+                for position, row_cost in zip(positions, costs, strict=True)
+            ],
             total_cost=cost,
             offer_price=offer,
             margin_percent=margin_numerator / offer,

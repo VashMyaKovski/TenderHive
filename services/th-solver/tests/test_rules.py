@@ -187,6 +187,9 @@ def test_confirmed_supply_changes_coverage_and_margin(
     assert result.resources[0].shortage == shortage
     assert isinstance(result.estimate, Estimate)
     assert result.estimate.total_cost == total_cost
+    row = result.estimate.positions[0]
+    assert isinstance(row, dict)
+    assert row["cost"] == str(total_cost)
     assert result.status == status
     assert result.stop_reasons == reasons
 
