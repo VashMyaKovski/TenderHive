@@ -11,3 +11,6 @@ context
 **/.pytest_cache
 **/.ruff_cache
 **/.mypy_cache
+**/bin
+**/obj
+services/th-gateway/data
