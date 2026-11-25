@@ -1,0 +1,70 @@
+@page "/login"
+@inject GatewayClient Gateway
+@inject SessionState Session
+@inject NavigationManager Navigation
+
+<h1>Вход в дашборд</h1>
+
+<div class="card narrow">
+    <label for="username">Логин</label>
+    <input id="username" @bind="username" autocomplete="username" />
+
+    <label for="password">Пароль</label>
+    <input id="password" type="password" @bind="password" autocomplete="current-password" />
+
+    @if (error is not null)
+    {
+        <p class="error">@error</p>
+    }
+
+    <button class="primary" @onclick="SignInAsync" disabled="@busy">@(busy ? "Проверка…" : "Войти")</button>
+</div>
+
+<p class="muted">
+    Демонстрационные учётные записи: specialist (тендерный специалист), procurement (снабженец),
+    lawyer (юрист), head (руководитель подразделения), kbadmin (администратор базы знаний).
+    Пароль задаётся переменной <code>DEMO_PASSWORD</code>.
+</p>
+
+@code {
+    private string username = "specialist";
+    private string password = string.Empty;
+    private string? error;
+    private bool busy;
+
+    protected override void OnInitialized()
+    {
+        if (Session.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/");
+        }
+    }
+
+    private async Task SignInAsync()
+    {
+        busy = true;
+        error = null;
+        try
+        {
+            var response = await Gateway.LoginAsync(username.Trim(), password);
+            Session.SignIn(response);
+            Navigation.NavigateTo("/");
+        }
+        catch (GatewayException exception)
+        {
+            error = exception.Message;
+        }
+        catch (HttpRequestException)
+        {
+            error = "Шлюз недоступен: проверьте переменную GATEWAY_BASE_URL.";
+        }
+        catch (TaskCanceledException)
+        {
+            error = "Шлюз не ответил за отведённое время.";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+}

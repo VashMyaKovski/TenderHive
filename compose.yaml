@@ -205,9 +205,49 @@ services:
       - ./infra/monitoring/dashboards:/var/lib/grafana/dashboards/tenderhive:ro
     ports: ["127.0.0.1:${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in .env}:3000"]
 
+  th-gateway:
+    profiles: ["gateway"]
+    build:
+      context: .
+      dockerfile: services/th-gateway/Dockerfile
+    env_file:
+      - ./services/th-gateway/.env.example
+      - path: ./services/th-gateway/.env
+        required: false
+    environment:
+      POSTGRES_DSN: "Host=postgres;Port=5432;Database=${POSTGRES_DB:?Set POSTGRES_DB in .env};Username=${POSTGRES_USER:?Set POSTGRES_USER in .env};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+      KAFKA_BROKERS: kafka:29092
+      GATEWAY_PUBLIC_URL: http://127.0.0.1:${GATEWAY_HOST_PORT:-8080}
+      ARTIFACT_BUCKET: /app/data/artifacts
+      ASPNETCORE_URLS: http://+:8080
+    ports: ["127.0.0.1:${GATEWAY_HOST_PORT:-8080}:8080"]
+    volumes: ["gateway_artifacts:/app/data/artifacts"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  th-web:
+    profiles: ["gateway"]
+    build:
+      context: .
+      dockerfile: services/th-web/Dockerfile
+    env_file:
+      - ./services/th-web/.env.example
+      - path: ./services/th-web/.env
+        required: false
+    environment:
+      GATEWAY_BASE_URL: http://th-gateway:8080
+      ASPNETCORE_URLS: http://+:8081
+    ports: ["127.0.0.1:${TH_WEB_HOST_PORT:-8081}:8081"]
+    depends_on:
+      - th-gateway
+
 volumes:
   postgres:
   neo4j:
   qdrant:
   kafka:
   eval_reports:
+  gateway_artifacts:

@@ -228,3 +228,10 @@ __marimo__/
 /AGENTS.md
 /context/
 /services/th-eval/reports/
+
+# .NET / C# services (th-gateway, th-web)
+bin/
+obj/
+*.user
+data/
+tmp/
