@@ -2,13 +2,13 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Annotated
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import httpx
 from pydantic import Field, JsonValue, ValidationError
 
 from tender_eval.cases import Contract, DatasetError, DatasetHeader, EvalCase
-from tender_eval.gateway import INFERENCE_PATH
+from tender_eval.gateway import INFERENCE_PATH, TRACE_HEADER
 
 
 class Fixture(Contract):
@@ -27,15 +27,22 @@ class FixtureSet:
             if request.method != "POST" or request.url.path != INFERENCE_PATH:
                 return httpx.Response(404)
             request_data = _FixtureRequest.model_validate_json(request.content)
+            if request.headers.get(TRACE_HEADER) != str(request_data.trace_id):
+                return httpx.Response(422)
             fixture = self.responses[request_data.job_id]
-            body = {"trace_id": str(uuid4()), **fixture.response}
+            body = {"trace_id": str(request_data.trace_id), **fixture.response}
             if fixture.status == 200:
                 body = {
                     "job_id": str(request_data.job_id),
                     "prompt_version": prompt_version,
+                    "cached": False,
                     **body,
                 }
-            return httpx.Response(fixture.status, json=body)
+            elif body.get("status") == "UNAVAILABLE":
+                body["job_id"] = str(request_data.job_id)
+            return httpx.Response(
+                fixture.status, json=body, headers={TRACE_HEADER: str(request_data.trace_id)}
+            )
 
         return httpx.MockTransport(respond)
 
@@ -46,6 +53,7 @@ class _FixtureRequest(Contract):
     context: list[JsonValue]
     prompt_version: str
     mask: bool
+    trace_id: UUID
 
 
 def load_fixtures(path: Path, dataset_version: str, cases: tuple[EvalCase, ...]) -> FixtureSet:

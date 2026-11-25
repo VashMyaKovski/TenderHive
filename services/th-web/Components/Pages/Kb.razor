@@ -1,0 +1,171 @@
+@page "/kb"
+@inject GatewayClient Gateway
+@inject SessionState Session
+@inject NavigationManager Navigation
+
+<h1>База знаний</h1>
+
+@if (error is not null)
+{
+    <p class="error">@error</p>
+}
+@if (message is not null)
+{
+    <p class="success">@message</p>
+}
+
+<div class="toolbar">
+    <button class="primary" @onclick="LoadAsync" disabled="@busy">@(busy ? "Обновление…" : "Обновить")</button>
+    @if (versions is not null)
+    {
+        <span class="muted">Активная версия: <span class="mono">@versions.ActiveVersion</span></span>
+    }
+</div>
+
+@if (versions is not null)
+{
+    <section class="card">
+        <h2>Версии</h2>
+        <table class="grid">
+            <thead>
+            <tr>
+                <th>Версия</th>
+                <th>Состояние</th>
+                <th>Создана (UTC)</th>
+                <th>Правил</th>
+                <th>Активирована</th>
+                <th>Примечание</th>
+                <th></th>
+            </tr>
+            </thead>
+            <tbody>
+            @foreach (var version in versions.Versions)
+            {
+                <tr>
+                    <td class="mono">@version.Version</td>
+                    <td><span class="@(version.Status == "active" ? "badge ok" : "badge")">@(version.Status == "active" ? "активна" : "архив")</span></td>
+                    <td>@DisplayText.Utc(version.CreatedAt)</td>
+                    <td>@version.RulesCount</td>
+                    <td>@DisplayText.UtcOrEmpty(version.ActivatedAt) @(string.IsNullOrWhiteSpace(version.ActivatedBy) ? "" : $"· {version.ActivatedBy}")</td>
+                    <td class="muted">@version.Notes</td>
+                    <td>
+                        @if (Session.IsInRole(AppRole.KbAdmin) && version.Status != "active")
+                        {
+                            <button class="link" @onclick="() => ActivateAsync(version.Version)" disabled="@busy">
+                                @(versions.ActiveVersion is not null && version.CreatedAt < ActiveCreatedAt() ? "Откатить" : "Активировать")
+                            </button>
+                        }
+                        else if (!Session.IsInRole(AppRole.KbAdmin))
+                        {
+                            <span class="muted">только администратор БЗ</span>
+                        }
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+        <p class="muted">
+            Активация и откат фиксируются в журнале ниже. Откат возвращает предыдущую версию правил; сами правила
+            сопровождает сервис <code>th-kb</code>, дашборд только переключает активную версию.
+        </p>
+    </section>
+
+    <section class="card">
+        <h2>Журнал активации</h2>
+        @if (activations.Count == 0)
+        {
+            <p class="muted">Записей нет.</p>
+        }
+        else
+        {
+            <table class="grid">
+                <thead>
+                <tr>
+                    <th>Время (UTC)</th>
+                    <th>Версия</th>
+                    <th>Действие</th>
+                    <th>Кто</th>
+                    <th>Комментарий</th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach (var activation in activations)
+                {
+                    <tr>
+                        <td>@DisplayText.Utc(activation.OccurredAt)</td>
+                        <td class="mono">@activation.Version</td>
+                        <td>@(activation.Action == "rollback" ? "откат" : "активация")</td>
+                        <td>@activation.Actor</td>
+                        <td class="muted">@activation.Comment</td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        }
+    </section>
+}
+
+@code {
+    private KbVersionsResponse? versions;
+    private List<KbActivationDto> activations = new();
+    private string? error;
+    private string? message;
+    private bool busy;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Session.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login");
+            return;
+        }
+
+        await LoadAsync();
+    }
+
+    private DateTimeOffset ActiveCreatedAt() =>
+        versions?.Versions.FirstOrDefault(version => version.Status == "active")?.CreatedAt ?? DateTimeOffset.MinValue;
+
+    private async Task LoadAsync()
+    {
+        busy = true;
+        error = null;
+        try
+        {
+            versions = await Gateway.GetKbVersionsAsync();
+            activations = await Gateway.GetKbActivationsAsync();
+        }
+        catch (GatewayException exception)
+        {
+            error = exception.Message;
+        }
+        catch (HttpRequestException)
+        {
+            error = "Шлюз недоступен: проверьте переменную GATEWAY_BASE_URL.";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task ActivateAsync(string version)
+    {
+        message = null;
+        error = null;
+        try
+        {
+            await Gateway.ActivateKbVersionAsync(version, "Переключение из дашборда");
+            message = $"Активной назначена версия {version}.";
+            await LoadAsync();
+        }
+        catch (GatewayException exception)
+        {
+            error = exception.Message;
+        }
+        catch (HttpRequestException)
+        {
+            error = "Шлюз недоступен: проверьте переменную GATEWAY_BASE_URL.";
+        }
+    }
+}

@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,61 +9,28 @@ import httpx
 from pydantic import ValidationError
 
 from tender_eval.cases import DatasetError, load_dataset
-from tender_eval.config import Settings
-from tender_eval.fixtures import load_fixtures
-from tender_eval.gateway import HttpGateway
+from tender_eval.config import ApiSettings, Settings
+from tender_eval.execution import execute
 from tender_eval.report import (
     CacheProfile,
-    RunManifest,
-    build_report,
     compare_reports,
     read_report,
     write_report,
 )
-from tender_eval.runner import run_cases
 from tender_eval.telemetry import publish_metrics
 
 
 async def run(settings: Settings, live: bool, cache_profile: CacheProfile) -> int:
-    dataset = load_dataset(settings.dataset_path)
-    cases = tuple(case for case in dataset.cases if case.live) if live else dataset.cases
-    if not cases or len(cases) * settings.repeats > settings.max_attempts:
-        raise DatasetError("selected scenarios are empty or exceed the configured attempt budget")
-    if cache_profile == "isolated_cold" and settings.repeats != 1:
-        raise DatasetError("an isolated cold run requires one repeat on a fresh gateway cache")
-    fixtures = None if live else load_fixtures(settings.fixture_path, dataset.version, cases)
-    manifest = RunManifest(
-        run_id=uuid4(),
-        started_at=datetime.now(UTC),
-        mode="live" if live else "fixture",
-        dataset_version=dataset.version,
-        dataset_sha256=dataset.digest,
-        fixture_sha256=fixtures.digest if fixtures else None,
-        case_ids=tuple(case.case_id for case in cases),
-        model_label=settings.model_label,
-        prompt_version=settings.prompt_version,
-        cache_profile=cache_profile,
-        repeats=settings.repeats,
-        concurrency=settings.concurrency,
-        timeout_seconds=settings.timeout_seconds,
-        ece_buckets=settings.ece_buckets,
-        min_risk_macro_f1=settings.min_risk_macro_f1,
+    report, observations = await execute(
+        settings,
+        load_dataset(settings.dataset_path),
+        uuid4(),
+        live,
+        cache_profile,
+        settings.model_label,
+        settings.prompt_version,
     )
-    async with httpx.AsyncClient(
-        base_url=str(settings.gateway_url),
-        timeout=settings.timeout_seconds,
-        transport=fixtures.make_transport(settings.prompt_version) if fixtures else None,
-        trust_env=False,
-        follow_redirects=False,
-    ) as client:
-        observations = await run_cases(
-            HttpGateway(client, settings.timeout_seconds),
-            cases,
-            settings.prompt_version,
-            settings.concurrency,
-            settings.repeats,
-        )
-    report = build_report(manifest, observations)
+    manifest = report.run
     destination = write_report(settings.report_dir, report, observations)
     if settings.otlp_metrics_url is not None:
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as telemetry:
@@ -94,12 +60,17 @@ def main() -> int:
     run_parser = commands.add_parser("run")
     run_parser.add_argument("--live", action="store_true")
     run_parser.add_argument("--cache-profile", choices=("unverified", "isolated_cold", "warm"))
+    commands.add_parser("serve")
+    commands.add_parser("migrate")
+    commands.add_parser("healthcheck")
     compare_parser = commands.add_parser("compare")
     compare_parser.add_argument("baseline", type=Path)
     compare_parser.add_argument("candidate", type=Path)
     args = parser.parse_args(sys.argv[1:] or ["run"])
 
     try:
+        if args.command in {"serve", "migrate", "healthcheck"}:
+            return api_command(args.command, ApiSettings.model_validate({}))
         if args.command == "compare":
             print(
                 json.dumps(
@@ -126,6 +97,45 @@ def main() -> int:
     except KeyboardInterrupt:
         return 130
     return 2
+
+
+def api_command(command: str, settings: ApiSettings) -> int:
+    import psycopg
+    import uvicorn
+
+    from tender_eval.api import create_app
+    from tender_eval.storage import Store
+
+    loop_factory = asyncio.SelectorEventLoop if sys.platform == "win32" else None
+    store = Store(settings.postgres_dsn.get_secret_value(), settings.database_timeout_seconds)
+    try:
+        if command == "migrate":
+            dataset = load_dataset(settings.dataset_path)
+            asyncio.run(store.migrate(dataset, settings.kb_version), loop_factory=loop_factory)
+        elif command == "healthcheck":
+            host = settings.bind_host
+            address = "127.0.0.1" if host.is_unspecified else str(host)
+            if host.version == 6:
+                address = "[::1]" if host.is_unspecified else f"[{host}]"
+            with httpx.Client(timeout=settings.database_timeout_seconds, trust_env=False) as client:
+                client.get(
+                    f"http://{address}:{settings.port}/healthz",
+                    headers={"X-Trace-Id": str(uuid4())},
+                ).raise_for_status()
+        else:
+            server = uvicorn.Server(
+                uvicorn.Config(
+                    create_app(settings, store),
+                    host=str(settings.bind_host),
+                    port=settings.port,
+                    access_log=False,
+                )
+            )
+            asyncio.run(server.serve(), loop_factory=loop_factory)
+    except psycopg.Error, TimeoutError, httpx.HTTPError:
+        print("th-eval API or PostgreSQL unavailable", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

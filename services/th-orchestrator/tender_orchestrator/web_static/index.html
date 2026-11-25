@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ru" data-type="software">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f6fb">
+  <meta name="page-type" content="software">
+  <meta name="site-kind" content="software">
+  <title>TenderHive — Анализ закупки</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='8'%20fill='%236b48d6'/%3E%3Cpath%20fill='white'%20d='M7%207h7v7H7zM18%207h7v7h-7zM7%2018h7v7H7zM18%2018h7v7h-7z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/workbench.css">
+  <script src="/static/workbench.js" type="module"></script>
+</head>
+<body>
+  <a class="skip" href="#main">К содержанию</a>
+  <svg class="icons" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.4"/><rect x="14" y="3" width="7" height="7" rx="1.4"/><rect x="3" y="14" width="7" height="7" rx="1.4"/><rect x="14" y="14" width="7" height="7" rx="1.4"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M2 12h4l3-7 4 14 3-7h6"/></symbol>
+    <symbol id="i-result" viewBox="0 0 24 24"><path d="M4 21h16M4 14v3m5-8v8m6-5v5m5-14v14"/><path d="m5 9 4-4 5 2 6-4"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V3m-5 5 5-5 5 5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 2 2.1 7.9L22 12l-7.9 2.1L12 22l-2.1-7.9L2 12l7.9-2.1z"/></symbol>
+  </svg>
+  <aside class="sidebar" aria-label="Рабочее пространство">
+    <a href="#main" class="brand" translate="no"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>TenderHive</a>
+    <nav aria-label="Разделы">
+      <a class="nav-link selected" href="#main"><svg aria-hidden="true"><use href="#i-grid"/></svg>Анализ закупки</a>
+      <a class="nav-link" href="#documents"><svg aria-hidden="true"><use href="#i-file"/></svg>Документы</a>
+      <a class="nav-link" href="#activity"><svg aria-hidden="true"><use href="#i-pulse"/></svg>Лента агентов</a>
+      <a class="nav-link" href="#outcome"><svg aria-hidden="true"><use href="#i-result"/></svg>Результат</a>
+    </nav>
+    <div class="sidebar-end"><span class="environment-dot" aria-hidden="true"></span>Локальный стенд</div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <div class="workspace">
+      <header class="topbar">
+        <span>Рабочее пространство <span aria-hidden="true">/</span> <strong>Анализ закупки</strong></span>
+        <span id="run-state" class="state" aria-live="polite"><i aria-hidden="true"></i>Новый анализ</span>
+      </header>
+      <section class="hero" aria-labelledby="title">
+        <div class="hero-text">
+          <h1 id="title">Анализ закупки</h1>
+          <p>Загрузите документы, проследите работу агентов и получите рекомендацию об участии с обоснованием.</p>
+        </div>
+        <div class="hero-network" aria-hidden="true">
+          <span class="orbit orbit-a"></span><span class="orbit orbit-b"></span><span class="orbit orbit-c"></span>
+          <i class="network-dot network-a"></i><i class="network-dot network-b"></i><i class="network-dot network-c"></i>
+          <span class="network-center"><svg><use href="#i-spark"/></svg></span>
+        </div>
+      </section>
+      <div class="workspace-grid">
+        <form id="run-form" class="panel entry" autocomplete="off">
+          <section id="documents" aria-labelledby="documents-title">
+            <div class="section-head">
+              <div><h2 id="documents-title">Документы закупки</h2><p>Добавьте файлы с условиями и требованиями.</p></div>
+              <button id="sample" class="button ghost" type="button">Заполнить пример</button>
+            </div>
+            <div id="drop-zone" class="drop-zone">
+              <span class="upload-icon"><svg aria-hidden="true"><use href="#i-upload"/></svg></span>
+              <strong>Перетащите файлы сюда</strong>
+              <button id="browse" class="button pick" type="button">Выбрать файлы</button>
+              <input id="files" name="documents" hidden type="file" multiple accept=".pdf,.txt,application/pdf,text/plain" aria-label="Документы закупки">
+              <small id="formats">PDF и TXT · до 5 файлов, до 2 МБ каждый</small>
+            </div>
+            <ul class="files" id="file-list" aria-label="Выбранные файлы"></ul>
+          </section>
+          <section class="parameters" aria-labelledby="parameters-title">
+            <h2 id="parameters-title">Параметры закупки</h2>
+            <p>Укажите исходные данные для сметы и проверки ресурсов.</p>
+            <label class="field wide">Название закупки
+              <input id="purchase-title" name="title" maxlength="140" placeholder="Например, поставка хозяйственных товаров…" required>
+            </label>
+            <div class="field-grid">
+              <label class="field">Количество по лоту<input name="quantity" type="number" inputmode="decimal" min="0.01" step="any" required></label>
+              <label class="field">Срок действия предложения, раб. дн.<input name="offer_validity_workdays" type="number" inputmode="numeric" min="0" max="3650" step="1" required></label>
+              <label class="field">Себестоимость за единицу, BYN<input name="unit_cost" type="number" inputmode="decimal" min="0.01" step="any" required></label>
+              <label class="field">Сумма предложения, BYN<input name="offer_price" type="number" inputmode="decimal" min="0.01" step="any" required></label>
+              <label class="field">Доступное количество<input name="available_quantity" type="number" inputmode="decimal" min="0" step="any" required></label>
+              <label class="field">Неустойка в день, % <span class="optional">если известна</span><input name="penalty_daily_percent" type="number" inputmode="decimal" min="0" max="100" step="any"></label>
+            </div>
+            <label class="field wide">Фрагмент условий для оценки риска
+              <textarea id="context" name="context" maxlength="2000" rows="3" required aria-describedby="context-note" placeholder="Например, условие о неустойке за просрочку…"></textarea>
+              <span id="context-note" class="optional">Этот фрагмент передаётся модели. Используйте общедоступный текст без персональных данных.</span>
+            </label>
+          </section>
+          <p id="form-error" class="form-error" role="alert" hidden></p>
+          <div class="form-actions">
+            <button id="run-button" class="button primary" type="submit">Запустить анализ <svg aria-hidden="true"><use href="#i-arrow"/></svg></button>
+          </div>
+        </form>
+        <div class="side-panels">
+          <section id="activity" tabindex="-1" class="panel feed" aria-labelledby="feed-title">
+            <div class="section-head feed-head"><div><h2 id="feed-title">Лента агентов</h2><p>Обмен результатами между участниками.</p></div><span id="message-count" class="counter" aria-label="Сообщений: 0">0</span></div>
+            <div id="feed-empty" class="empty-feed">
+              <span class="empty-icon"><svg aria-hidden="true"><use href="#i-pulse"/></svg></span>
+              <strong>Пока нет сообщений</strong><p>Лента заполнится после запуска анализа.</p>
+            </div>
+            <ol id="messages" class="messages" tabindex="0" aria-label="Сообщения агентов" aria-live="polite"></ol>
+          </section>
+          <section id="outcome" class="panel outcome" aria-labelledby="result-title">
+            <div class="section-head"><div><h2 id="result-title">Рекомендация</h2><p>Решение и причины, на которых оно основано.</p></div><span class="result-icon"><svg aria-hidden="true"><use href="#i-result"/></svg></span></div>
+            <p id="outcome-empty" class="result-placeholder">Результат появится после работы решателя.</p>
+            <div id="outcome-body" hidden>
+              <p id="recommendation" class="recommendation"></p>
+              <ul id="reasons" class="reasons"></ul>
+            </div>
+            <div id="approval" class="approval" hidden>
+              <strong>Требуется согласование</strong>
+              <p id="approval-reason"></p>
+              <label class="field">Комментарий к решению
+                <textarea id="decision-comment" maxlength="600" rows="2" placeholder="Укажите причину, если отклоняете…"></textarea>
+              </label>
+              <div class="approval-actions">
+                <button id="approve" type="button" class="button primary">Согласовать</button>
+                <button id="reject" type="button" class="button ghost">Отклонить</button>
+              </div>
+            </div>
+            <p id="run-error" class="form-error" role="alert" hidden></p>
+            <ul id="artifact-links" class="artifacts" aria-label="Готовые документы"></ul>
+            <p id="run-documents" class="run-documents"></p>
+            <p id="run-id" class="run-id" translate="no"></p>
+          </section>
+        </div>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

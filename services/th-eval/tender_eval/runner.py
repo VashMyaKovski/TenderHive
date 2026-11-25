@@ -12,7 +12,14 @@ from tender_eval.cases import (
     RiskLevel,
     Stratum,
 )
-from tender_eval.gateway import Exchange, Gateway, GatewayError, GatewayFault, GatewaySuccess
+from tender_eval.gateway import (
+    Exchange,
+    Gateway,
+    GatewayError,
+    GatewayFault,
+    GatewaySuccess,
+    UnavailableReason,
+)
 
 type Issue = Literal[
     "transport_timeout",
@@ -55,9 +62,11 @@ class Observation(Contract):
     latency_ms: float
     http_status: int | None
     trace_id: UUID | None
+    cached: bool | None = None
     reference_level: RiskLevel | None
     expected_error: GatewayErrorCode | None
     error: GatewayErrorCode | None
+    unavailable_reason: UnavailableReason | None = None
     fault: GatewayFault | None
     prediction: Prediction | None
     issues: tuple[Issue, ...]
@@ -112,9 +121,11 @@ def evaluate(case: EvalCase, repeat: int, exchange: Exchange, prompt_version: st
         latency_ms=exchange.latency_ms,
         http_status=exchange.status,
         trace_id=trace_id,
+        cached=response.cached if isinstance(response, GatewaySuccess) else None,
         reference_level=case.expected.level if isinstance(case.expected, RiskExpectation) else None,
         expected_error=case.expected.code if isinstance(case.expected, ErrorExpectation) else None,
         error=response.code if isinstance(response, GatewayError) else None,
+        unavailable_reason=exchange.unavailable_reason,
         fault=exchange.fault,
         prediction=prediction,
         issues=tuple(issues),

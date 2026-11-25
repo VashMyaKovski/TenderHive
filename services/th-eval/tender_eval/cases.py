@@ -32,6 +32,7 @@ type GatewayErrorCode = Literal[
     "provider_timeout",
     "invalid_provider_response",
     "task_disabled",
+    "storage_unavailable",
 ]
 
 
@@ -75,7 +76,7 @@ class ErrorExpectation(Contract):
         match self.code:
             case "provider_rejected" | "invalid_provider_response":
                 status = 502
-            case "provider_unavailable" | "task_disabled":
+            case "provider_unavailable" | "task_disabled" | "storage_unavailable":
                 status = 503
             case "provider_timeout":
                 status = 504

@@ -12,6 +12,55 @@ x-th-orchestrator: &th-orchestrator-settings
     TH_ORCHESTRATOR_DATABASE_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
     TH_ORCHESTRATOR_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
 
+x-th-modelgw: &th-modelgw-settings
+  profiles: ["modelgw"]
+  build:
+    context: ./services/th-modelgw
+  env_file:
+    - ./services/th-modelgw/.env.example
+    - path: ./services/th-modelgw/.env
+      required: false
+  environment:
+    MODEL_GW_PROVIDER: ${MODEL_GW_PROVIDER-openrouter}
+    OPENROUTER_API_KEY: ${OPENROUTER_API_KEY-}
+    OPENROUTER_MODEL_TEST: ${OPENROUTER_MODEL_TEST-}
+    OPENROUTER_EMBEDDING_MODEL: ${OPENROUTER_EMBEDDING_MODEL-}
+    OPENROUTER_VISION_MODEL: ${OPENROUTER_VISION_MODEL-}
+    NVIDIA_API_KEY: ${NVIDIA_API_KEY-}
+    MODEL_RISK: ${MODEL_RISK-}
+    MODEL_GW_MASKING_KEY: ${MODEL_GW_MASKING_KEY-}
+    MODEL_GW_POSTGRES_DSN: ${MODEL_GW_POSTGRES_DSN-}
+    MODEL_GW_PORT: ${MODEL_GW_PORT:-8000}
+
+x-th-eval: &th-eval-settings
+  profiles: ["eval"]
+  build:
+    context: ./services/th-eval
+  env_file:
+    - ./services/th-eval/.env.example
+    - path: ./services/th-eval/.env
+      required: false
+
+x-th-eval-api: &th-eval-api-settings
+  <<: *th-eval-settings
+  environment:
+    TH_EVAL_POSTGRES_DSN: ${TH_EVAL_POSTGRES_DSN-}
+    TH_EVAL_BIND_HOST: 0.0.0.0
+    TH_EVAL_PORT: ${TH_EVAL_PORT:-8000}
+
+x-th-kb: &th-kb-settings
+  profiles: ["kb"]
+  build:
+    context: ./services/th-kb
+  env_file:
+    - ./services/th-kb/.env.example
+    - path: ./services/th-kb/.env
+      required: false
+  environment:
+    KB_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env}
+    KB_EVAL_TOKEN: ${KB_EVAL_TOKEN:-local-demo-kb-eval-token}
+    KB_PORT: ${KB_PORT:-8000}
+
 services:
   postgres:
     image: postgres:17.9
@@ -68,23 +117,22 @@ services:
       timeout: 3s
       retries: 10
 
+  th-modelgw-migrate:
+    <<: *th-modelgw-settings
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   th-modelgw:
-    profiles: ["modelgw", "kb", "solver"]
-    build:
-      context: ./services/th-modelgw
-    env_file:
-      - ./services/th-modelgw/.env.example
-      - path: ./services/th-modelgw/.env
-        required: false
-    environment:
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY-}
-      OPENROUTER_MODEL_TEST: ${OPENROUTER_MODEL_TEST-}
-      MODEL_GW_PORT: ${MODEL_GW_PORT:-8000}
+    <<: *th-modelgw-settings
     ports:
       - "127.0.0.1:${MODEL_GW_HOST_PORT:-8001}:${MODEL_GW_PORT:-8000}"
     depends_on:
       redis:
         condition: service_healthy
+      th-modelgw-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "modelgw", "healthcheck"]
       interval: 10s
@@ -101,6 +149,13 @@ services:
       - ./services/th-agents/.env.example
       - path: ./services/th-agents/.env
         required: false
+    volumes:
+      - agents-artifacts:/var/lib/tenderhive/artifacts
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "tender_agents", "healthcheck"]
       interval: 5s
@@ -119,6 +174,10 @@ services:
     <<: *th-orchestrator-settings
     depends_on:
       th-orchestrator-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "tender_orchestrator", "healthcheck"]
@@ -153,7 +212,7 @@ services:
 
   kafka-init:
     image: apache/kafka:4.1.2
-    profiles: ["setup", "integrations"]
+    profiles: ["setup", "orchestrator", "integrations", "agents"]
     depends_on:
       kafka:
         condition: service_healthy
@@ -164,69 +223,72 @@ services:
       - ./infra/kafka/create-topics.sh:/opt/tenderhive/create-topics.sh:ro
 
   th-eval:
-    profiles: ["eval"]
-    build:
-      context: ./services/th-eval
-    env_file:
-      - ./services/th-eval/.env.example
-      - path: ./services/th-eval/.env
-        required: false
+    <<: *th-eval-settings
     environment:
       TH_EVAL_REPORT_DIR: /reports
     volumes:
       - eval_reports:/reports
 
-  th-schema-init:
-    profiles: ["kb", "solver", "integrations"]
-    image: postgres:17.9
+  th-eval-migrate:
+    <<: *th-eval-api-settings
+    command: ["migrate"]
     depends_on:
       postgres:
         condition: service_healthy
-    environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-    volumes:
-      - ./services/th-kb/migrations:/migrations/kb:ro
-      - ./services/th-integrations/migrations:/migrations/integrations:ro
-    entrypoint:
-      - /bin/sh
-      - -ec
-      - |
-        for file in /migrations/kb/*.sql /migrations/integrations/*.sql; do
-          psql -h postgres -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -v ON_ERROR_STOP=1 -f "$$file"
-        done
 
-  th-kb:
-    profiles: ["kb", "solver"]
-    build:
-      context: .
-      dockerfile: services/th-kb/Dockerfile
-    env_file:
-      - ./services/th-kb/.env.example
-      - path: ./services/th-kb/.env
-        required: false
-    environment:
-      KB_POSTGRES_DSN: postgresql://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
-      KB_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD in .env}
-      KB_PORT: ${KB_PORT:-8000}
-    ports:
-      - "127.0.0.1:${KB_HOST_PORT:-8002}:${KB_PORT:-8000}"
+  th-eval-api:
+    <<: *th-eval-api-settings
+    command: ["serve"]
     depends_on:
-      th-schema-init:
+      th-eval-migrate:
         condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${TH_EVAL_HOST_PORT:-8002}:${TH_EVAL_PORT:-8000}"
+    healthcheck:
+      test: ["CMD", "python", "-m", "tender_eval", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  th-kb-migrate:
+    <<: *th-kb-settings
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
       neo4j:
         condition: service_healthy
       qdrant:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-      th-modelgw:
-        condition: service_healthy
+
+  th-kb:
+    <<: *th-kb-settings
+    ports:
+      - "127.0.0.1:${KB_HOST_PORT:-8005}:${KB_PORT:-8000}"
+    depends_on:
+      th-kb-migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-m", "th_kb", "healthcheck"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "python", "-m", "tender_kb", "healthcheck"]
+      interval: 5s
+      timeout: 15s
       retries: 10
       start_period: 5s
+
+  th-solver-migrate:
+    profiles: ["solver"]
+    build:
+      context: .
+      dockerfile: services/th-solver/Dockerfile
+    env_file:
+      - services/th-solver/.env.example
+      - path: services/th-solver/.env
+        required: false
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   th-solver:
     profiles: ["solver"]
@@ -234,59 +296,19 @@ services:
       context: .
       dockerfile: services/th-solver/Dockerfile
     env_file:
-      - ./services/th-solver/.env.example
-      - path: ./services/th-solver/.env
+      - services/th-solver/.env.example
+      - path: services/th-solver/.env
         required: false
-    environment:
-      SOLVER_KB_URL: http://th-kb:8000
-      SOLVER_MODELGW_URL: http://th-modelgw:8000
-      SOLVER_REDIS_URL: redis://redis:6379/1
-      SOLVER_PORT: ${SOLVER_PORT:-8000}
-    ports:
-      - "127.0.0.1:${SOLVER_HOST_PORT:-8003}:${SOLVER_PORT:-8000}"
     depends_on:
-      th-kb:
-        condition: service_healthy
-      th-modelgw:
-        condition: service_healthy
+      th-solver-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-m", "tender_solver", "healthcheck"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 10
-      start_period: 5s
-
-  th-integrations:
-    profiles: ["integrations"]
-    build:
-      context: .
-      dockerfile: services/th-integrations/Dockerfile
-    env_file:
-      - ./services/th-integrations/.env.example
-      - path: ./services/th-integrations/.env
-        required: false
-    environment:
-      INTEGRATIONS_POSTGRES_DSN: postgresql://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}
-      INTEGRATIONS_REDIS_URL: redis://redis:6379/2
-      INTEGRATIONS_KAFKA_BROKERS: kafka:29092
-      INTEGRATIONS_PORT: ${INTEGRATIONS_PORT:-8000}
-    ports:
-      - "127.0.0.1:${INTEGRATIONS_HOST_PORT:-8004}:${INTEGRATIONS_PORT:-8000}"
-    depends_on:
-      th-schema-init:
-        condition: service_completed_successfully
-      kafka-init:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-m", "tender_integrations", "healthcheck"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.165.0
@@ -317,9 +339,62 @@ services:
       - ./infra/monitoring/dashboards:/var/lib/grafana/dashboards/tenderhive:ro
     ports: ["127.0.0.1:${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in .env}:3000"]
 
+  mail-sandbox:
+    image: greenmail/standalone:2.1.8
+    profiles: ["integrations"]
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap
+        -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users.login=email
+        -Dgreenmail.users=demo:demo-mail-only@example.test
+    ports:
+      - "127.0.0.1:${TH_INTEGRATIONS_SMTP_HOST_PORT:-3025}:3025"
+
+  th-integrations-migrate:
+    profiles: ["integrations"]
+    build:
+      context: .
+      dockerfile: services/th-integrations/Dockerfile
+    env_file:
+      - ./services/th-integrations/.env.example
+      - path: ./services/th-integrations/.env
+        required: false
+    command: ["migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  th-integrations:
+    profiles: ["integrations"]
+    build:
+      context: .
+      dockerfile: services/th-integrations/Dockerfile
+    env_file:
+      - ./services/th-integrations/.env.example
+      - path: ./services/th-integrations/.env
+        required: false
+    ports:
+      - "127.0.0.1:${TH_INTEGRATIONS_HOST_PORT:-8003}:${TH_INTEGRATIONS_PORT:-8000}"
+    depends_on:
+      th-integrations-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      mail-sandbox:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-m", "tender_integrations", "healthcheck"]
+      interval: 5s
+      timeout: 8s
+      retries: 10
+      start_period: 5s
+
 volumes:
   postgres:
   neo4j:
   qdrant:
   kafka:
   eval_reports:
+  agents-artifacts:

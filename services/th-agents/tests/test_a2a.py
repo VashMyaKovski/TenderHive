@@ -3,20 +3,58 @@ import json
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
-from uuid import uuid4
+from tempfile import TemporaryDirectory
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import reportlab
 from a2a.helpers.proto_helpers import get_data_parts
 from a2a.types.a2a_pb2 import TaskState
 
+from contracts.agent_task import AgentCompleted, AgentResult
 from contracts.risk_task_v1 import HumanReason, RiskFailureV1, RiskResultV1
 from tender_agents.api import create_app
 from tender_agents.config import Settings
 from tender_agents.demo import send
+from tender_agents.ledger import Claim, RiskLedger
 from tests.gateway_stub import response_for
 
 ORIGIN = "http://agent.invalid"
+TEST_ARTIFACT_TOKEN = "test-only-service-access-token"
+
+
+class MemoryLedger:
+    def __init__(self) -> None:
+        self._states: dict[UUID, tuple[str, UUID | None, str]] = {}
+        self.completions: list[AgentCompleted] = []
+
+    async def claim(self, task_id: UUID, fingerprint: str, owner: UUID) -> Claim:
+        current = self._states.get(task_id)
+        if current is not None:
+            original, active, outcome = current
+            if original != fingerprint:
+                return "conflict", ""
+            if outcome:
+                return "recorded", outcome
+            if active is not None:
+                return "busy", ""
+        self._states[task_id] = fingerprint, owner, ""
+        return "owned", ""
+
+    async def finish(
+        self, task_id: UUID, owner: UUID, outcome: str, completion: AgentCompleted | None
+    ) -> bool:
+        fingerprint, active, _ = self._states[task_id]
+        if active != owner:
+            return False
+        self._states[task_id] = fingerprint, None, outcome
+        if completion is not None:
+            self.completions.append(completion)
+        return True
+
+    async def ready(self) -> bool:
+        return True
 
 
 @pytest.fixture
@@ -30,6 +68,19 @@ def payload() -> dict[str, object]:
 async def agent(
     gateway: Callable[[httpx.Request], httpx.Response]
     | Callable[[httpx.Request], Coroutine[None, None, httpx.Response]],
+    ledger: RiskLedger | None = None,
+) -> AsyncIterator[httpx.AsyncClient]:
+    with TemporaryDirectory() as directory:
+        async with _agent_with_storage(gateway, ledger, Path(directory)) as client:
+            yield client
+
+
+@asynccontextmanager
+async def _agent_with_storage(
+    gateway: Callable[[httpx.Request], httpx.Response]
+    | Callable[[httpx.Request], Coroutine[None, None, httpx.Response]],
+    ledger: RiskLedger | None,
+    directory: Path,
 ) -> AsyncIterator[httpx.AsyncClient]:
     settings = Settings.model_validate(
         {
@@ -38,9 +89,21 @@ async def agent(
             "public_url": ORIGIN,
             "bind_host": "127.0.0.1",
             "port": 8000,
+            "redis_url": "redis://unused.invalid:6379/0",
+            "redis_timeout_seconds": 0.05,
+            "task_ttl_seconds": 300,
+            "task_lease_seconds": 10,
+            "task_wait_seconds": 0.2,
+            "task_poll_seconds": 0.001,
+            "kafka_brokers": ["unused.invalid:9092"],
+            "completion_poll_seconds": 0.05,
+            "completion_timeout_seconds": 1,
+            "artifact_root": directory,
+            "pdf_font_path": Path(str(reportlab.__file__)).parent / "fonts" / "Vera.ttf",
+            "artifact_token": TEST_ARTIFACT_TOKEN,
         }
     )
-    app = create_app(settings, httpx.MockTransport(gateway))
+    app = create_app(settings, httpx.MockTransport(gateway), ledger or MemoryLedger())
     async with (
         app.router.lifespan_context(app),
         httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client,
@@ -64,21 +127,31 @@ async def test_a2a_sdk_reads_card_and_returns_validated_result(
     confidence: float,
 ) -> None:
     payload["penalty_daily_percent"] = rate
+    payload["trace_id"] = str(uuid4())
     requests = []
 
     def gateway(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
-        assert request.url.path == "/api/v1/inference"
+        assert request.url.path == "/api/v1/invoke"
         body = json.loads(request.content)
+        assert request.headers["X-Trace-Id"] == payload["trace_id"] == body["trace_id"]
         requests.append(body)
         return httpx.Response(200, json=response_for(body, reason, confidence))
 
     async with agent(gateway) as client:
         raw = await send(client, ORIGIN, payload)
         card = (await client.get(ORIGIN + "/.well-known/agent-card.json")).json()
-        schema = (await client.get(ORIGIN + "/schemas/risk-v1.json")).json()
+        schema = (await client.get(ORIGIN + "/api/v1/schemas/risk-v1.json")).json()
 
-    assert [item["id"] for item in card["skills"]] == ["risk_assessment"]
+    assert {item["id"] for item in card["skills"]} == {
+        "risk_assessment",
+        "extraction",
+        "legal",
+        "resource",
+        "estimate",
+        "supply",
+        "document",
+    }
     assert len(card["supportedInterfaces"]) == 1
     assert "RiskTaskV1" in schema["$defs"]
     assert raw.status.state == TaskState.TASK_STATE_COMPLETED
@@ -95,6 +168,7 @@ async def test_a2a_sdk_reads_card_and_returns_validated_result(
             "task": "risk_assessment",
             "mask": True,
             "prompt_version": "v1",
+            "trace_id": payload["trace_id"],
             "context": [
                 {"type": "public_text", "text": payload["fragment_text"]},
                 {
@@ -109,13 +183,12 @@ async def test_a2a_sdk_reads_card_and_returns_validated_result(
 
 
 @pytest.mark.parametrize(
-    ("mutation", "success"),
-    [("empty_sources", True), ("wrong_job", False), ("bad_source", False), ("bad_schema", False)],
+    "mutation",
+    ["empty_sources", "wrong_job", "wrong_trace", "bad_source", "bad_schema"],
 )
 async def test_response_correlation_and_source_validation(
     payload: dict[str, object],
     mutation: str,
-    success: bool,
 ) -> None:
     def gateway(request: httpx.Request) -> httpx.Response:
         result = response_for(json.loads(request.content), "penalty_above_threshold", 0.9)
@@ -124,6 +197,8 @@ async def test_response_correlation_and_source_validation(
                 result["answer"]["source_ids"] = []
             case "wrong_job":
                 result["job_id"] = str(uuid4())
+            case "wrong_trace":
+                result["trace_id"] = str(uuid4())
             case "bad_source":
                 result["answer"]["source_ids"] = [2]
             case "bad_schema":
@@ -132,13 +207,9 @@ async def test_response_correlation_and_source_validation(
 
     async with agent(gateway) as client:
         task = await send(client, ORIGIN, payload)
-    if success:
-        result = RiskResultV1.model_validate(get_data_parts(task.artifacts[0].parts)[0])
-        assert result.sources == []
-    else:
-        failure = RiskFailureV1.model_validate(get_data_parts(task.status.message.parts)[0])
-        assert failure.code == "invalid_gateway_response"
-        assert failure.trace_id is not None and not failure.retryable
+    failure = RiskFailureV1.model_validate(get_data_parts(task.status.message.parts)[0])
+    assert failure.code == "invalid_gateway_response"
+    assert failure.trace_id is not None and not failure.retryable
 
 
 @pytest.mark.parametrize("invalid_rate", [0.15, "1.5e-1", "0.0000001", "100.000001"])
@@ -183,29 +254,39 @@ async def test_protocol_error_omits_decoder_details() -> None:
 
 
 @pytest.mark.parametrize(
-    ("status", "code", "retryable"),
+    ("status", "code", "reason", "retryable"),
     [
-        (422, "unsafe_context", False),
-        (422, "unsupported_prompt_version", False),
-        (503, "provider_unavailable", True),
-        (504, "provider_timeout", True),
-        (502, "provider_rejected", False),
-        (503, "task_disabled", False),
+        (422, "unsafe_context", None, False),
+        (422, "unsupported_prompt_version", None, False),
+        (503, "provider_unavailable", "unavailable", True),
+        (503, "provider_unavailable", "rate_limit", True),
+        (504, "provider_timeout", "timeout", True),
+        (502, "provider_rejected", "auth", False),
+        (502, "invalid_provider_response", "schema_mismatch", False),
+        (503, "task_disabled", None, False),
+        (503, "gateway_storage_unavailable", None, True),
     ],
 )
 async def test_gateway_failures_preserve_trace_and_make_one_attempt(
     status: int,
     code: str,
+    reason: str | None,
     retryable: bool,
     payload: dict[str, object],
 ) -> None:
     count = 0
     trace_id = uuid4()
+    payload["trace_id"] = str(trace_id)
 
     def gateway(_: httpx.Request) -> httpx.Response:
         nonlocal count
         count += 1
-        return httpx.Response(status, json={"code": code, "trace_id": str(trace_id)})
+        if reason is not None:
+            body = {"status": "UNAVAILABLE", "reason": reason, "job_id": payload["job_id"]}
+        else:
+            wire_code = "storage_unavailable" if code == "gateway_storage_unavailable" else code
+            body = {"code": wire_code, "message": "Request rejected"}
+        return httpx.Response(status, json={**body, "trace_id": str(trace_id)})
 
     async with agent(gateway) as client:
         task = await send(client, ORIGIN, payload)
@@ -223,11 +304,18 @@ async def test_retry_resubmits_the_application_task(payload: dict[str, object]) 
     def gateway(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
+        body = json.loads(request.content)
         if attempts == 1:
             return httpx.Response(
-                503, json={"code": "provider_unavailable", "trace_id": str(uuid4())}
+                503,
+                json={
+                    "job_id": body["job_id"],
+                    "status": "UNAVAILABLE",
+                    "reason": "unavailable",
+                    "trace_id": body["trace_id"],
+                },
             )
-        result = response_for(json.loads(request.content), "penalty_above_threshold", 0.9)
+        result = response_for(body, "penalty_above_threshold", 0.9)
         return httpx.Response(200, json=result)
 
     async with agent(gateway) as client:
@@ -258,4 +346,74 @@ async def test_transport_failures_are_retryable(
 
     failure = RiskFailureV1.model_validate(get_data_parts(task.status.message.parts)[0])
     assert failure.code == ("gateway_timeout" if simulate_timeout else "gateway_transport_error")
-    assert failure.retryable and failure.trace_id is None
+    assert failure.retryable and failure.trace_id is not None
+
+
+async def test_duplicate_task_reuses_outcome_across_workers(payload: dict[str, object]) -> None:
+    calls = 0
+    ledger = MemoryLedger()
+
+    async def gateway(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return httpx.Response(
+            200, json=response_for(json.loads(request.content), "penalty_above_threshold", 0.9)
+        )
+
+    async with agent(gateway, ledger) as worker_one, agent(gateway, ledger) as worker_two:
+        first, second = await asyncio.gather(
+            send(worker_one, ORIGIN, payload), send(worker_two, ORIGIN, payload)
+        )
+        changed = await send(
+            worker_two, ORIGIN, {**payload, "fragment_text": "A different public clause."}
+        )
+
+    assert calls == 1
+    first_result = RiskResultV1.model_validate(get_data_parts(first.artifacts[0].parts)[0])
+    second_result = RiskResultV1.model_validate(get_data_parts(second.artifacts[0].parts)[0])
+    assert first_result.trace_id == second_result.trace_id
+    assert first_result.a2a_task_id == first.id != second.id == second_result.a2a_task_id
+    failure = RiskFailureV1.model_validate(get_data_parts(changed.status.message.parts)[0])
+    assert failure.code == "task_id_conflict" and not failure.retryable
+
+
+async def test_common_agent_contract_reports_review_and_invalid_inputs(
+    payload: dict[str, object],
+) -> None:
+    trace_id = uuid4()
+    fields = {
+        "fragment_id",
+        "source",
+        "fragment_text",
+        "fragment_type",
+        "penalty_daily_percent",
+        "penalty_daily_threshold_percent",
+        "prompt_version",
+    }
+    body = {
+        "task_id": payload["task_id"],
+        "job_id": payload["job_id"],
+        "agent_role": "risk",
+        "input": {key: payload[key] for key in fields},
+        "kb_version": payload["rules_version"],
+        "trace_id": str(trace_id),
+    }
+    calls = 0
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        doc = response_for(json.loads(request.content), "penalty_above_threshold", 0.9)
+        return httpx.Response(200, json=doc)
+
+    async with agent(gateway) as client:
+        completed = await send(client, ORIGIN, body)
+        invalid = await send(client, ORIGIN, {**body, "agent_role": "legal"})
+    assert calls == 1
+    result = AgentResult.model_validate(get_data_parts(completed.artifacts[0].parts)[0])
+    assert result.status == "NEEDS_REVIEW"
+    assert result.model_calls[0].trace_id == result.trace_id == trace_id
+    assert result.evidence[0]["source"] == payload["source"]
+    failed = AgentResult.model_validate(get_data_parts(invalid.status.message.parts)[0])
+    assert failed.status == "FAILED" and failed.result["code"] == "invalid_request"

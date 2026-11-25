@@ -1,5 +1,4 @@
 from typing import Any
-from uuid import uuid4
 
 from fastapi import FastAPI
 
@@ -18,7 +17,8 @@ def response_for(
         "model_version": "fixture/model",
         "prompt_version": request["prompt_version"],
         "masked": True,
-        "trace_id": str(uuid4()),
+        "cached": False,
+        "trace_id": request["trace_id"],
         "answer": {
             "kind": "risk_assessment",
             "hypothesis": {
@@ -47,8 +47,8 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/api/v1/inference")
-    async def inference(body: dict[str, Any]) -> dict[str, Any]:
+    @app.post("/api/v1/invoke")
+    async def invoke(body: dict[str, Any]) -> dict[str, Any]:
         return response_for(body, "penalty_above_threshold", 0.9)
 
     return app

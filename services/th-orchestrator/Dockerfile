@@ -4,7 +4,7 @@ WORKDIR /app
 ENV UV_LINK_MODE=copy PATH="/app/.venv/bin:$PATH"
 COPY services/th-orchestrator/pyproject.toml services/th-orchestrator/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
-COPY contracts/__init__.py contracts/models.py contracts/risk_task_v1.py ./contracts/
+COPY contracts/__init__.py contracts/agent_task.py contracts/models.py contracts/risk_task_v1.py ./contracts/
 COPY services/th-orchestrator/tender_orchestrator ./tender_orchestrator
 
 FROM build AS test

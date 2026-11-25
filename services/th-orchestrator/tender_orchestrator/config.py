@@ -4,6 +4,7 @@ from pydantic import (
     Field,
     HttpUrl,
     IPvAnyAddress,
+    RedisDsn,
     SecretStr,
     StringConstraints,
     field_validator,
@@ -43,10 +44,20 @@ class Settings(BaseSettings):
     review_timeout_seconds: Annotated[float, Field(gt=0, le=31_536_000, allow_inf_nan=False)]
     poll_interval_seconds: PositiveTimeout
     poll_batch_size: Annotated[int, Field(ge=1, le=1000)]
+    redis_url: RedisDsn
+    io_timeout_seconds: PositiveTimeout
+    checkpoint_ttl_seconds: Annotated[int, Field(ge=1, le=604800)]
+    kafka_brokers: Annotated[
+        list[Annotated[str, StringConstraints(pattern=r"^[^\s:/]+:[0-9]{1,5}$")]],
+        Field(min_length=1),
+    ]
+    kafka_group_id: Name
     service_token: Token
     reviewers: Annotated[list[ReviewerCredential], Field(min_length=1)]
     bind_host: IPvAnyAddress
     port: Port
+    artifact_token: Token | None = None
+    artifact_max_bytes: Annotated[int, Field(ge=1, le=104857600)] | None = None
 
     @field_validator("agent_url")
     @classmethod
@@ -57,6 +68,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_credentials(self) -> Settings:
+        if (self.artifact_token is None) != (self.artifact_max_bytes is None):
+            raise ValueError("artifact token and size limit must be configured together")
         tokens = [
             self.service_token.get_secret_value(),
             *(item.token.get_secret_value() for item in self.reviewers),

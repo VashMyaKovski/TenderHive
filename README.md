@@ -1,6 +1,6 @@
 # TenderHive
 
-TenderHive помогает готовить заявки на тендеры в Беларуси. Система принимает документы, извлекает требования, проверяет допуск и ресурсы, рассчитывает смету и риски, передаёт спорные случаи на согласование и формирует пакет заявки.
+TenderHive помогает готовить проекты предложений для тендеров в Беларуси. Система предназначена для приёма документов, извлечения требований, предварительной проверки соответствия и ресурсов, расчёта сметы и рисков, согласования и подготовки пакета предложения.
 
 В репозитории подготовлен общий фундамент для разработки. [Карта сервисов](services/README.md) описывает границы модулей, [контракты](contracts/README.md) задают форматы обмена, а [CONTRIBUTING.md](CONTRIBUTING.md) описывает работу команды через `dev`.
 
@@ -20,21 +20,13 @@ docker compose run --rm kafka-init
 docker compose ps
 ```
 
-`kafka-init` создаёт пять тем из [контракта Kafka](contracts/README.md). Команду можно запускать повторно. Для запуска модельного шлюза с OpenRouter используйте профиль `modelgw` и [инструкцию сервиса](services/th-modelgw/README.md).
+`kafka-init` создаёт пять тем из [контракта Kafka](contracts/README.md). Команду можно запускать повторно. Для модельного шлюза NVIDIA используйте профиль `modelgw` и [инструкцию сервиса](services/th-modelgw/README.md).
 
-Контролируемый регрессионный прогон `th-eval` запускается командой `docker compose --env-file .env.example run --build --rm th-eval`. Настройки live-прогона, формат отчётов и сравнение версий описаны в [документации модуля](services/th-eval/README.md).
+Контролируемый регрессионный прогон `th-eval` запускается командой `docker compose --env-file .env.example run --build --rm th-eval`. Для API с сохранением прогонов в PostgreSQL запустите `docker compose --env-file .env.example up --build --wait th-eval-api`. С хоста API доступен на `http://127.0.0.1:8002`. Настройки, формат отчётов и сравнение версий описаны в [документации модуля](services/th-eval/README.md).
 
 Пример вызова `th-agents` через A2A оценивает условие о пене из опубликованной закупки. Команды для тестового и модельного шлюза приведены в [документации агента](services/th-agents/README.md).
 
-`th-orchestrator` проводит то же задание через оценку риска, карточку согласования и продолжение после перезапуска. [Сценарий с PostgreSQL и тестовым шлюзом](services/th-orchestrator/README.md)
-
-База знаний, решатель и приём почты поднимаются профилями `kb`, `solver` и `integrations`:
-
-```sh
-docker compose --profile kb --profile solver --profile integrations up --build --wait
-```
-
-Контракты этих сервисов описаны в их README: [th-kb](services/th-kb/README.md), [th-solver](services/th-solver/README.md), [th-integrations](services/th-integrations/README.md).
+`th-orchestrator` проводит задание через оценку риска и согласование, восстанавливает процесс после перезапуска и ждёт подтверждённый комплект артефактов после финального утверждения. [Сценарий с PostgreSQL и тестовым шлюзом](services/th-orchestrator/README.md)
 
 | Компонент | Адрес с хоста по умолчанию | Адрес внутри Compose |
 | --- | --- | --- |
@@ -45,19 +37,11 @@ docker compose --profile kb --profile solver --profile integrations up --build -
 | Redis | `127.0.0.1:6379` | `redis:6379` |
 | Kafka | `127.0.0.1:9092` | `kafka:29092` |
 
-Для локального мониторинга запустите `docker compose --profile monitoring up --wait`. OpenTelemetry Collector принимает метрики по OTLP/gRPC на `127.0.0.1:4317` и OTLP/HTTP на `127.0.0.1:4318`. Prometheus доступен на `http://127.0.0.1:9090`, Grafana с настроенным источником Prometheus — на `http://127.0.0.1:3000`. Учётные данные Grafana задаются в `.env`. Инструментирование приложений и хранение трассировок добавляются вместе с сервисами.
+Для локального мониторинга запустите `docker compose --profile monitoring up --wait`. OpenTelemetry Collector принимает метрики и трассировки по OTLP/gRPC на `127.0.0.1:4317` и OTLP/HTTP на `127.0.0.1:4318`. Prometheus доступен на `http://127.0.0.1:9090`, Grafana с настроенным источником Prometheus — на `http://127.0.0.1:3000`. Учётные данные Grafana задаются в `.env`. Для экспорта трассировок модельного шлюза задайте `MODEL_GW_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces` в `services/th-modelgw/.env`. Локальный Collector выводит сводку о полученных трассировках в журнал.
 
-Остановить стек можно командой `docker compose --profile monitoring --profile modelgw --profile eval --profile agents --profile orchestrator --profile kb --profile solver --profile integrations down`. Именованные тома PostgreSQL, Neo4j, Qdrant, Kafka и отчётов `th-eval` сохраняются.
+Остановить стек можно командой `docker compose --profile monitoring --profile modelgw --profile eval --profile agents --profile orchestrator down`. Именованные тома PostgreSQL, Neo4j, Qdrant, Kafka и отчётов `th-eval` сохраняются.
 
 ## Проверки
-
-Перед коммитом запускаются pre-commit хуки `ruff` и `ruff-format`. Установите их один раз после синхронизации окружения:
-
-```sh
-uv run --locked pre-commit install
-```
-
-Хуки находятся в [`.pre-commit-config.yaml`](.pre-commit-config.yaml) и используют версию Ruff из `uv.lock`. Полный набор проверок:
 
 ```sh
 uv run --locked ruff check .

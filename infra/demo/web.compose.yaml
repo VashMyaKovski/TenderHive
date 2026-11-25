@@ -1,0 +1,32 @@
+services:
+  th-workbench:
+    profiles: ["web"]
+    build:
+      context: .
+      dockerfile: services/th-orchestrator/Dockerfile
+    env_file:
+      - infra/demo/.env.example
+    environment:
+      DEMO_WEB_URL: http://th-workbench:8000
+      DEMO_WEB_PORT: "8000"
+      DEMO_WEB_MAX_RUNS: ${TH_WORKBENCH_MAX_RUNS:-16}
+      DEMO_WEB_MARGIN_THRESHOLD_PERCENT: ${SOLVER_MARGIN_THRESHOLD_PERCENT:-10}
+      DEMO_WEB_PENALTY_THRESHOLD_PERCENT: ${TH_WORKBENCH_PENALTY_THRESHOLD_PERCENT:-0.1}
+      DEMO_WEB_PROFILE_REF: demo-profile
+    entrypoint: ["python", "-m", "tender_orchestrator.workbench"]
+    ports:
+      - "127.0.0.1:${TH_WORKBENCH_HOST_PORT:-8787}:8000"
+    depends_on:
+      th-orchestrator:
+        condition: service_healthy
+      th-agents:
+        condition: service_healthy
+      th-solver:
+        condition: service_healthy
+      th-kb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).close()"]
+      interval: 5s
+      timeout: 4s
+      retries: 12

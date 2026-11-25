@@ -1,0 +1,93 @@
+services:
+  postgres:
+    ports: !reset []
+  neo4j:
+    ports: !reset []
+  qdrant:
+    ports: !reset []
+  redis:
+    ports: !reset []
+  kafka:
+    ports: !reset []
+  th-modelgw:
+    ports: !reset []
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import os, urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:' + os.environ['MODEL_GW_PORT'] + '/readyz', timeout=5).close()
+      timeout: 10s
+      start_period: 15s
+  th-solver:
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import os, urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:' + os.environ['SOLVER_PORT'] + '/healthz', timeout=5).close()
+      timeout: 10s
+      start_period: 15s
+  th-agents:
+    healthcheck:
+      timeout: 15s
+  th-orchestrator:
+    healthcheck:
+      timeout: 15s
+  th-kb:
+    ports: !reset []
+    healthcheck:
+      timeout: 15s
+  th-eval-api:
+    ports: !reset []
+    healthcheck:
+      timeout: 15s
+
+  th-workbench:
+    ports: !reset []
+    environment:
+      DEMO_WEB_SERVICE_TOKEN: ${DASH_WORKBENCH_TOKEN:?Run Start-TenderHive.ps1}
+
+  th-gateway:
+    profiles: [dashboard]
+    build:
+      context: .
+      dockerfile: services/th-gateway/Dockerfile
+    env_file: services/th-gateway/.env.example
+    environment:
+      POSTGRES_DSN: ""
+      KAFKA_BROKERS: ""
+      TELEGRAM_BOT_TOKEN: ""
+      JWT_SECRET: ${DASH_JWT_SECRET:?Run Start-TenderHive.ps1}
+      SERVICE_API_KEY: ${DASH_SERVICE_KEY:?Run Start-TenderHive.ps1}
+      DEMO_PASSWORD: ${DASH_DEMO_PASSWORD:?Run Start-TenderHive.ps1}
+      DEMO_WORKBENCH_URL: http://th-workbench:8000
+      DEMO_WORKBENCH_TOKEN: ${DASH_WORKBENCH_TOKEN:?Run Start-TenderHive.ps1}
+      DEMO_ACCESS_GRANTS_FILE: /var/lib/tenderhive-demo/grants.json
+      GATEWAY_PUBLIC_URL: http://th-gateway:8080
+    volumes:
+      - dashboard_access_grants:/var/lib/tenderhive-demo
+    depends_on:
+      th-workbench:
+        condition: service_healthy
+
+  th-web:
+    profiles: [dashboard]
+    build:
+      context: .
+      dockerfile: services/th-web/Dockerfile
+    environment:
+      GATEWAY_BASE_URL: http://th-gateway:8080
+      DEMO_DASHBOARD_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${TH_DASHBOARD_PORT:-8081}:8081"
+    depends_on:
+      th-gateway:
+        condition: service_started
+
+volumes:
+  dashboard_access_grants:

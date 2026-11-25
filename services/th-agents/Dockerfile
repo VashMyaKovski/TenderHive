@@ -5,7 +5,7 @@ ENV UV_LINK_MODE=copy PATH="/app/.venv/bin:$PATH"
 COPY services/th-agents/pyproject.toml services/th-agents/uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev
 COPY services/th-agents/tender_agents ./tender_agents
-COPY contracts/__init__.py contracts/risk_task_v1.py ./contracts/
+COPY contracts/__init__.py contracts/agent_task.py contracts/models.py contracts/risk_task_v1.py ./contracts/
 COPY services/th-agents/examples ./examples
 
 FROM build AS test
@@ -14,6 +14,10 @@ COPY services/th-agents/tests ./tests
 CMD ["uv", "run", "--locked", "--no-sync", "pytest"]
 
 FROM python:3.14.10-slim-trixie AS runtime
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && install -d -o 10001 -g 10001 /var/lib/tenderhive/artifacts
 WORKDIR /app
 COPY --from=build /app/.venv ./.venv
 COPY --from=build /app/tender_agents ./tender_agents
