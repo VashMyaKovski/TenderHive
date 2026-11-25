@@ -1,5 +1,5 @@
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
@@ -12,6 +12,7 @@ from pydantic import (
     model_validator,
 )
 
+from contracts.agent_task import PositiveQuantity, Quantity
 from contracts.models import (
     Artifact,
     DecisionValue,
@@ -62,6 +63,7 @@ type ErrorCode = Literal[
     "decision_conflict",
     "stage_conflict",
     "result_mismatch",
+    "decision_evidence_required",
 ]
 type Profile = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 
@@ -111,9 +113,17 @@ class WorkflowError(Exception):
         self.code: ErrorCode = code
 
 
+class ReviewPoint(Contract):
+    reason_code: Annotated[
+        StopReason,
+        BeforeValidator(lambda value: value.upper() if isinstance(value, str) else value),
+    ]
+
+
 class StartJob(Contract):
     job: Job
     risk: RiskTaskV1
+    reviews: list[ReviewPoint] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_risk_task(self) -> StartJob:
@@ -125,13 +135,22 @@ class StartJob(Contract):
             raise ValueError("job idempotency key must have between 1 and 200 characters")
         if not 1 <= len(self.job.profile_ref) <= 200:
             raise ValueError("job must reference a profile")
+        if len({point.reason_code for point in self.reviews}) != len(self.reviews):
+            raise ValueError("review points must be unique")
         return self
+
+
+class SupplyConfirmation(Contract):
+    quantity: PositiveQuantity
+    delivery_date: date
+    additional_cost: Quantity
 
 
 class DecisionRequest(Contract):
     decision_id: UUID
     decision: DecisionValue
     comment: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
+    supply_confirmation: SupplyConfirmation | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -186,6 +205,7 @@ class ReviewCard(Contract):
     state: CardState
     timeout: bool
     decision: HumanDecision | LegacyHumanDecision | None
+    supply_confirmation: SupplyConfirmation | None = None
 
 
 class AssessmentFailure(Contract):
@@ -248,6 +268,7 @@ class IncomingDecision(Contract):
     card_id: UUID
     actor_id: UUID
     decision: HumanDecision
+    supply_confirmation: SupplyConfirmation | None = None
 
 
 class OutboxEvent(Contract):

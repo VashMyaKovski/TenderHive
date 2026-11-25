@@ -2,12 +2,15 @@ import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg.conninfo import make_conninfo
+from psycopg.sql import SQL, Identifier
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr
 from redis.asyncio import Redis
@@ -19,7 +22,8 @@ from tender_orchestrator.agent import AgentClient
 from tender_orchestrator.api import create_app
 from tender_orchestrator.application import Orchestrator
 from tender_orchestrator.config import ReviewerCredential, Settings
-from tender_orchestrator.db import Database, JobStore, connection_info
+from tender_orchestrator.db import Database, JobStore, connection_info, migrate, migration_scripts
+from tender_orchestrator.graph import RiskGraph
 from tender_orchestrator.models import (
     RISK_REASONS,
     CachedPosition,
@@ -29,6 +33,7 @@ from tender_orchestrator.models import (
     JobView,
     OutboxEvent,
     Reviewer,
+    ReviewPoint,
     Role,
     StartJob,
 )
@@ -72,9 +77,12 @@ class ManualClock:
 
 
 class StubAgent:
-    def __init__(self, reason: HumanReason | None, failures: tuple[bool, ...] = ()) -> None:
+    def __init__(
+        self, reason: HumanReason | None, failures: tuple[bool, ...] = (), *, high: bool = False
+    ) -> None:
         self.reason: HumanReason | None = reason
         self.failures = failures
+        self.high = high
         self.calls = 0
 
     async def assess(self, request: RiskTaskV1) -> RiskResultV1:
@@ -93,7 +101,7 @@ class StubAgent:
             rules_version=request.rules_version,
             model_version="fixture/model",
             prompt_version=request.prompt_version,
-            risk_level="high",
+            risk_level="high" if self.reason or self.high else "low",
             summary="Public risk evidence",
             confidence=0.9,
             human_reason=self.reason,
@@ -135,7 +143,7 @@ class API:
                 await asyncio.sleep(0.02)
 
     async def decision(
-        self, job: JobView, token: str, body: dict[str, str], index: int = 0
+        self, job: JobView, token: str, body: Mapping[str, object], index: int = 0
     ) -> httpx.Response:
         card = job.cards[index]
         return await self.http.post(
@@ -334,7 +342,6 @@ async def test_canonical_review_and_artifact_gate_survive_restart_and_replays(
     roles: list[tuple[StopReason, str]] = [
         ("PENALTY_ABOVE_THRESHOLD", LAWYER),
         ("LOW_MARGIN", LEAD),
-        ("RESOURCE_GAP", SUPPLY),
         ("UNCLEAR_REQUIREMENTS", SPECIALIST),
         ("FINAL_APPROVAL", SPECIALIST),
     ]
@@ -364,9 +371,9 @@ async def test_canonical_review_and_artifact_gate_survive_restart_and_replays(
         assert await restarted.get(started.job.job_id) == review
         final = review.cards[-1]
         assert final.reason_code == "FINAL_APPROVAL" and final.role == "TENDER_SPECIALIST"
-        response = await restarted.decision(review, LAWYER, decision_payload(), index=4)
+        response = await restarted.decision(review, LAWYER, decision_payload(), index=3)
         assert response.status_code == 403
-        approved = await restarted.decision(review, SPECIALIST, decision_payload(), index=4)
+        approved = await restarted.decision(review, SPECIALIST, decision_payload(), index=3)
         waiting = JobView.model_validate(approved.raise_for_status().json())
         assert waiting.phase == "awaiting_artifacts" and waiting.job.status == "PROCESSING"
         assert (await restarted.http.post(artifact_url, json=premature)).status_code == 409
@@ -454,6 +461,164 @@ async def test_no_solution_escalates_and_clarifies_before_new_final_approval(
         assert agent.calls == 1
 
 
+async def test_unprofitable_extraction_handoff_declines_before_risk(
+    settings: Settings, request_body: StartJob
+) -> None:
+    agent = StubAgent("penalty_above_threshold")
+    async with running(settings, ManualClock(), agent) as api:
+        created = await api.http.post(JOBS_PATH, json=request_body.job.model_dump(mode="json"))
+        job = JobView.model_validate(created.raise_for_status().json())
+        path = f"{JOBS_PATH}/{job.job.job_id}/solver-result"
+        assert (await api.http.post(path, json=solver_payload(job, reasons=[]))).status_code == 409
+        body = solver_payload(job, reasons=["LOW_MARGIN", "NO_SOLUTION"], status="NO_SOLUTION")
+        result = body["result"]
+        assert isinstance(result, dict)
+        result["estimate"] = {
+            "positions": [],
+            "total_cost": "120",
+            "offer_price": "100",
+            "margin_percent": "-20",
+            "threshold": "10",
+            "threshold_source": "test",
+        }
+        result["recommendation"] = {"value": "NOT_PARTICIPATE", "conditions": []}
+        declined = await stage(api, job, "solver-result", body)
+        assert declined.phase == "declined" and declined.stage == "solve"
+        assert declined.solver_result is not None and not declined.cards and not declined.artifacts
+        assert declined.risk_result is None and agent.calls == 0
+        assert await stage(api, job, "solver-result", body) == declined
+
+
+@pytest.mark.parametrize("covered", [True, False])
+async def test_supply_confirmation_requires_fresh_solver_result(
+    settings: Settings, request_body: StartJob, covered: bool
+) -> None:
+    clock = ManualClock()
+    agent = StubAgent(None)
+    async with running(settings, clock, agent) as api:
+        started = await api.start(request_body)
+        initial = solver_payload(started, reasons=["LOW_MARGIN", "RESOURCE_GAP"])
+        review = await stage(api, started, "solver-result", initial)
+        assert review.cards[-1].reason_code == "RESOURCE_GAP"
+        assert (await api.decision(review, SUPPLY, decision_payload())).status_code == 422
+        answer: dict[str, object] = {
+            **decision_payload(),
+            "supply_confirmation": {
+                "quantity": "400",
+                "delivery_date": "2030-01-05",
+                "additional_cost": "100.25",
+            },
+        }
+        response = await api.decision(review, SUPPLY, answer)
+        resumed = JobView.model_validate(response.raise_for_status().json())
+        assert resumed.phase == "ready_for_next_stage" and resumed.stage == "solve"
+        assert resumed.execution_id != started.execution_id and resumed.solver_result is None
+        confirmation = resumed.cards[-1].supply_confirmation
+        assert confirmation is not None and confirmation.delivery_date == date(2030, 1, 5)
+        assert await stage(api, started, "solver-result", initial) == resumed
+
+        corrected = solver_payload(
+            resumed,
+            reasons=[] if covered else ["RESOURCE_GAP", "NO_SOLUTION"],
+            status="READY" if covered else "NO_SOLUTION",
+        )
+        result = corrected["result"]
+        assert isinstance(result, dict)
+        result["resources"] = [
+            {
+                "position_id": "lot",
+                "covered": covered,
+                "shortage": "0" if covered else "200",
+                "supply_deadline": None,
+                "alternatives": [],
+            }
+        ]
+        if not covered:
+            result["recommendation"] = {"value": "NOT_PARTICIPATE", "conditions": []}
+        final = await stage(api, resumed, "solver-result", corrected)
+        if covered:
+            assert (
+                final.phase == "awaiting_review" and final.cards[-1].reason_code == "FINAL_APPROVAL"
+            )
+        else:
+            assert final.phase == "declined" and len(final.cards) == 1 and not final.artifacts
+        assert agent.calls == 1
+
+
+async def test_high_model_risk_requires_lawyer_without_rejecting_automatically(
+    settings: Settings, request_body: StartJob
+) -> None:
+    async with running(settings, ManualClock(), StubAgent(None, high=True)) as api:
+        review = await api.start(request_body)
+        card = review.cards[-1]
+        assert review.phase == "awaiting_review" and card.role == "LAWYER"
+        assert card.reason_code == "UNCLEAR_REQUIREMENTS"
+        assert (
+            await api.decision(review, LAWYER, {**decision_payload(), "comment": ""})
+        ).status_code == 422
+        approved = await api.decision(review, LAWYER, decision_payload())
+        answer = JobView.model_validate(approved.raise_for_status().json())
+        assert answer.phase == "ready_for_next_stage"
+        decision = answer.cards[-1].decision
+        assert isinstance(decision, HumanDecision) and decision.comment == "Риск рассмотрен"
+
+
+async def test_legacy_review_sequence_escalates_each_card_without_reassessing_risk(
+    settings: Settings, request_body: StartJob
+) -> None:
+    request = request_body.model_copy(
+        update={
+            "reviews": [
+                ReviewPoint(reason_code="LOW_MARGIN"),
+                ReviewPoint(reason_code="RESOURCE_GAP"),
+                ReviewPoint(reason_code="FINAL_APPROVAL"),
+            ]
+        }
+    )
+    clock = ManualClock()
+    agent = StubAgent("penalty_above_threshold")
+    async with running(settings, clock, agent) as api:
+        waiting = await api.start(request)
+        for reason in ("PENALTY_ABOVE_THRESHOLD", "LOW_MARGIN", "RESOURCE_GAP", "FINAL_APPROVAL"):
+            card = waiting.cards[-1]
+            assert card.reason_code == reason and sum(c.state == "open" for c in waiting.cards) == 1
+            clock.time = card.deadline
+            await api.service.expire_due()
+            escalated = await api.get(waiting.job.job_id)
+            original, replacement = escalated.cards[-2:]
+            assert original.card_id == card.card_id and original.state == "timed_out"
+            assert replacement.reason_code == reason and replacement.timeout
+            assert replacement.state == "open" and replacement.role == "DIVISION_HEAD"
+            response: dict[str, object] = decision_payload()
+            if reason == "RESOURCE_GAP":
+                response["supply_confirmation"] = {
+                    "quantity": "400",
+                    "delivery_date": "2030-01-05",
+                    "additional_cost": "100.25",
+                }
+            decision = await api.decision(escalated, LEAD, response, index=len(escalated.cards) - 1)
+            waiting = JobView.model_validate(decision.raise_for_status().json())
+        assert waiting.phase == "ready_for_next_stage" and agent.calls == 1
+        assert not waiting.artifacts
+
+
+@pytest.mark.parametrize("reason", ["LOW_MARGIN", "NO_SOLUTION"])
+async def test_legacy_review_stop_and_failed_risk_with_no_solution_point(
+    settings: Settings, request_body: StartJob, reason: StopReason
+) -> None:
+    request = request_body.model_copy(update={"reviews": [ReviewPoint(reason_code=reason)]})
+    agent = StubAgent(None, () if reason == "LOW_MARGIN" else (False,))
+    async with running(settings, ManualClock(), agent) as api:
+        awaiting = await api.start(request)
+        assert awaiting.phase == "awaiting_review" and awaiting.cards[-1].reason_code == reason
+        stopped = await api.decision(
+            awaiting,
+            LEAD,
+            {**decision_payload(), "action": "stop", "comment": "Условие не принято"},
+        )
+        assert JobView.model_validate(stopped.raise_for_status().json()).phase == "declined"
+
+
 async def test_durable_extraction_handoff_and_stage_retry_only_repeat_failed_stage(
     settings: Settings,
     request_body: StartJob,
@@ -530,6 +695,140 @@ async def test_legacy_job_replay_and_decision_with_unknown_timestamp(
         assert result.cards[0].decision is not None
         assert "decided_at" not in result.cards[0].decision.model_dump()
         assert agent.calls == 0
+
+
+async def test_migration_003_recovers_dev_decisions_and_pending_review(
+    settings: Settings, request_body: StartJob
+) -> None:
+    base_conninfo = connection_info(settings)
+    base_db = Database(base_conninfo, 4)
+    schema = f"orchestrator_upgrade_{uuid4().hex}"
+    database = Database(make_conninfo(base_conninfo, options=f"-csearch_path={schema}"), 4)
+    scripts = migration_scripts()
+    assert [version for version, _ in scripts] == [1, 2, 3]
+    async with base_db.connect() as connection:
+        await connection.execute(SQL("CREATE SCHEMA {}").format(Identifier(schema)))
+    try:
+        await migrate(database, scripts[:2])
+        clock = ManualClock()
+        clock.time = datetime(2030, 1, 1, tzinfo=UTC)
+        decided_at = clock.time - timedelta(minutes=1)
+        job_id = request_body.job.job_id
+        risk = await StubAgent("penalty_above_threshold").assess(request_body.risk)
+        pending_job_id = uuid4()
+        pending_card = uuid4()
+        risk_card = uuid4()
+        decision_id = uuid4()
+        old = request_body.model_dump(mode="json", exclude_none=True)
+        old["job"]["status"] = "принято"
+        reviews = {
+            **old,
+            "job": {
+                **old["job"],
+                "job_id": str(pending_job_id),
+                "idempotency_key": str(pending_job_id),
+            },
+            "risk": {**old["risk"], "job_id": str(pending_job_id)},
+            "reviews": [
+                {"reason_code": "low_margin"},
+                {"reason_code": "final_approval"},
+            ],
+        }
+        lead = Reviewer(
+            actor_id=uuid4(),
+            role="DIVISION_HEAD",
+            profile_refs=frozenset({request_body.job.profile_ref}),
+        )
+        specialist = lead.model_copy(update={"actor_id": uuid4(), "role": "TENDER_SPECIALIST"})
+        async with database.connect() as connection:
+            await connection.execute(
+                """
+                INSERT INTO jobs (job_id, idempotency_key, request, phase, needs_advance,
+                                  risk_attempts, risk_result)
+                VALUES (%s, %s, %s, 'awaiting_review', true, 1, %s),
+                       (%s, %s, %s, 'awaiting_review', false, 1, %s)
+                """,
+                (
+                    job_id,
+                    request_body.job.idempotency_key,
+                    Jsonb(old),
+                    Jsonb(risk.model_dump(mode="json")),
+                    pending_job_id,
+                    str(pending_job_id),
+                    Jsonb(reviews),
+                    Jsonb(
+                        risk.model_copy(update={"job_id": pending_job_id}).model_dump(mode="json")
+                    ),
+                ),
+            )
+            await connection.execute(
+                """
+                INSERT INTO review_cards (card_id, job_id, step, reason_code, role,
+                    deadline, state, decision_id, actor_id, action, comment, decided_at)
+                VALUES (%s, %s, 'risk_review', 'penalty_above_threshold', 'юрист', %s,
+                    'decided', %s, %s, 'continue', 'Историческое согласование', %s),
+                    (%s, %s, 'margin_review', 'low_margin', 'руководитель подразделения', %s,
+                    'open', NULL, NULL, NULL, NULL, NULL)
+                """,
+                (
+                    risk_card,
+                    job_id,
+                    clock.time,
+                    decision_id,
+                    uuid4(),
+                    decided_at,
+                    pending_card,
+                    pending_job_id,
+                    clock.time,
+                ),
+            )
+        await migrate(database, scripts)
+        await migrate(database, scripts)
+        await database.check_ready()
+        agent = StubAgent(None)
+        async with database.connect() as checkpoints:
+            graph = RiskGraph(
+                AsyncPostgresSaver(checkpoints),
+                agent,
+                clock,
+                max_attempts=2,
+                retry_delay_seconds=0,
+                review_role="LAWYER",
+                review_timeout_seconds=30,
+            )
+            service = Orchestrator(database, graph, clock, 16, 30)
+            await service.recover_pending()
+            recovered = await service.status(job_id)
+            assert recovered.stage == "solve" and recovered.phase == "ready_for_next_stage"
+            assert recovered.cards[0].card_id == risk_card
+            decision = recovered.cards[0].decision
+            assert isinstance(decision, HumanDecision)
+            assert decision.decision_id == decision_id and decision.decided_at == decided_at
+            assert decision.comment == "Историческое согласование" and agent.calls == 0
+
+            await service.expire_due()
+            pending = await service.status(pending_job_id)
+            assert (
+                pending.cards[0].card_id == pending_card and pending.cards[0].state == "timed_out"
+            )
+            escalated = pending.cards[1]
+            assert escalated.role == "DIVISION_HEAD" and escalated.step == "review_escalation"
+            accepted = DecisionRequest(
+                decision_id=uuid4(), decision="APPROVED", comment="Обосновано"
+            )
+            advanced = await service.decide(pending_job_id, escalated.card_id, lead, accepted)
+            assert advanced.cards[-1].reason_code == "FINAL_APPROVAL"
+            final = await service.decide(
+                pending_job_id,
+                advanced.cards[-1].card_id,
+                specialist,
+                accepted.model_copy(update={"decision_id": uuid4()}),
+            )
+            assert final.phase == "ready_for_next_stage" and final.stage == "solve"
+            assert not final.artifacts and agent.calls == 0
+    finally:
+        async with base_db.connect() as connection:
+            await connection.execute(SQL("DROP SCHEMA {} CASCADE").format(Identifier(schema)))
 
 
 async def test_kafka_intake_decision_outbox_and_redis_checkpoint(

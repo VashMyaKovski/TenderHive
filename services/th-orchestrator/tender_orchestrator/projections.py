@@ -147,6 +147,7 @@ class Projections:
                     decision_id=event.decision.decision_id,
                     decision=event.decision.decision,
                     comment=event.decision.comment,
+                    supply_confirmation=event.supply_confirmation,
                 ),
                 source=event.decision,
             )

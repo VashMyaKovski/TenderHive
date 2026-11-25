@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from contracts.models import Job, StopReason
+from contracts.models import Job
 from contracts.risk_task_v1 import HumanReason, RiskResultV1, RiskTaskV1
 from tender_orchestrator.models import (
     Action,
@@ -14,10 +14,12 @@ from tender_orchestrator.models import (
     JobView,
     Phase,
     RetryStage,
+    ReviewCard,
     Reviewer,
     RiskInput,
     Role,
     SolverHandoff,
+    Stage,
     StageFailure,
     StartJob,
 )
@@ -48,6 +50,8 @@ class JobRecord:
     risk_attempts: int
     risk_result: RiskResultV1 | None
     failure: AssessmentFailure | None
+    stage: Stage
+    risk_review: HumanReason | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,9 +72,9 @@ class JobRepository(Protocol):
         self, job_id: UUID, reason: HumanReason, role: Role, deadline: datetime
     ) -> None: ...
     async def set_phase(self, job_id: UUID, phase: Phase) -> None: ...
+    async def finish_risk(self, job_id: UUID, deadline: datetime, *, failed: bool) -> None: ...
     async def mark_advanced(self, job_id: UUID) -> None: ...
-    async def card_role(self, job_id: UUID, card_id: UUID) -> Role: ...
-    async def card_reason(self, job_id: UUID, card_id: UUID) -> StopReason: ...
+    async def review_card(self, job_id: UUID, card_id: UUID) -> ReviewCard: ...
     async def expire(self, job_id: UUID, now: datetime) -> None: ...
     async def record_decision(
         self,

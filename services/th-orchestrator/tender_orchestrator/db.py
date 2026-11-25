@@ -13,7 +13,15 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.sql import SQL
 from psycopg.types.json import Jsonb
 
-from contracts.models import Artifact, HumanDecision, Job, SolverResult, StopReason
+from contracts.models import (
+    Artifact,
+    Estimate,
+    HumanDecision,
+    Job,
+    Recommendation,
+    SolverResult,
+    StopReason,
+)
 from contracts.risk_task_v1 import HumanReason, RiskResultV1, RiskTaskV1
 from tender_orchestrator.config import Settings
 from tender_orchestrator.models import (
@@ -42,11 +50,10 @@ from tender_orchestrator.models import (
     StageFailure,
     StartJob,
     WorkflowError,
-    normalize_role,
 )
 from tender_orchestrator.ports import JobRecord, RecordedDecision
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _RISK_STEPS = ("risk_review", "risk_escalation")
 _ESCALATION_STEPS = ("risk_escalation", "review_escalation")
@@ -217,6 +224,18 @@ class JobStore:
     async def job(self, job_id: UUID) -> JobRecord:
         row = await self._job_row(job_id)
         risk = row["risk_input"] or row["request"].get("risk")
+        risk_review = None
+        if row["phase"] == "awaiting_review" and row["stage"] == "risk":
+            card = await (
+                await self._connection.execute(
+                    """
+                    SELECT lower(reason_code) AS reason FROM review_cards
+                    WHERE job_id = %s AND step = 'risk_review' AND review_round = %s
+                    """,
+                    (job_id, row["risk_generation"]),
+                )
+            ).fetchone()
+            risk_review = card["reason"] if card else None
         return JobRecord(
             job=Job.model_validate(row["request"]["job"]),
             risk=RiskTaskV1.model_validate(risk) if risk is not None else None,
@@ -229,6 +248,8 @@ class JobStore:
             failure=AssessmentFailure.model_validate(row["failure"])
             if row["failure"] is not None
             else None,
+            stage=row["stage"],
+            risk_review=risk_review,
         )
 
     async def _job_row(
@@ -337,17 +358,50 @@ class JobStore:
                 )
                 if phase in {"failed", "declined"}:
                     await self._stage_event(job_id, "risk", "FAILED")
+            await self.mark_advanced(job_id)
 
     async def mark_advanced(self, job_id: UUID) -> None:
         await self._connection.execute(
             "UPDATE jobs SET needs_advance = false WHERE job_id = %s", (job_id,)
         )
 
-    async def card_role(self, job_id: UUID, card_id: UUID) -> Role:
-        return cast(Role, normalize_role((await self._card(job_id, card_id))["role"]))
+    async def finish_risk(self, job_id: UUID, deadline: datetime, *, failed: bool) -> None:
+        async with self._connection.transaction():
+            row = await self._job_row(job_id)
+            if row["stage"] != "risk":
+                return
+            legacy = row["request"].get("reviews")
+            if legacy:
+                request = StartJob.model_validate(row["request"])
+                completed = await (
+                    await self._connection.execute(
+                        "SELECT reason_code FROM review_cards WHERE job_id = %s AND state = 'decided'",
+                        (job_id,),
+                    )
+                ).fetchall()
+                reviewed = {_reason(card["reason_code"]) for card in completed}
+                reasons: list[StopReason] = [
+                    point.reason_code
+                    for point in request.reviews
+                    if point.reason_code not in reviewed
+                    and (not failed or point.reason_code == "NO_SOLUTION")
+                ]
+                if reasons:
+                    round_id = row["review_round"] + 1
+                    await self._connection.execute(
+                        "UPDATE jobs SET pending_reasons = %s, review_round = %s, "
+                        "needs_advance = false WHERE job_id = %s",
+                        (reasons, round_id, job_id),
+                    )
+                    await self._transition(job_id, "awaiting_review", "review")
+                    await self._open_card(
+                        job_id, "review", reasons[0], REVIEW_ROLES[reasons[0]], deadline, round_id
+                    )
+                    return
+            await self.set_phase(job_id, "failed" if failed else "ready_for_next_stage")
 
-    async def card_reason(self, job_id: UUID, card_id: UUID) -> StopReason:
-        return _reason((await self._card(job_id, card_id))["reason_code"])
+    async def review_card(self, job_id: UUID, card_id: UUID) -> ReviewCard:
+        return _public_card(await self._card(job_id, card_id))
 
     async def _card(self, job_id: UUID, card_id: UUID) -> DictRow:
         row = await (
@@ -390,12 +444,18 @@ class JobStore:
         now: datetime,
     ) -> None:
         card = await self._card(job_id, card_id)
+        confirmation = (
+            request.supply_confirmation.model_dump(mode="json")
+            if request.supply_confirmation
+            else None
+        )
         if card["state"] != "open":
             if (
                 card["decision_id"] == request.decision_id
                 and card["actor_id"] == actor.actor_id
                 and card["action"] == request.action
                 and card["comment"] == request.comment
+                and card["supply_confirmation"] == confirmation
             ):
                 return
             raise WorkflowError("decision_conflict")
@@ -405,7 +465,7 @@ class JobStore:
                     """
                     UPDATE review_cards SET state = 'decided', decision_id = %s, actor_id = %s,
                         action = %s, comment = %s, decided_at = %s, decided_role = %s,
-                        question = COALESCE(question, %s)
+                        question = COALESCE(question, %s), supply_confirmation = %s
                     WHERE job_id = %s AND card_id = %s AND state = 'open'
                         AND (step IN ('risk_escalation', 'review_escalation') OR deadline > %s)
                     """,
@@ -417,6 +477,7 @@ class JobStore:
                         now,
                         actor.role,
                         REVIEW_QUESTIONS[_reason(card["reason_code"])],
+                        Jsonb(confirmation) if confirmation is not None else None,
                         job_id,
                         card_id,
                         now,
@@ -495,18 +556,63 @@ class JobStore:
             data = body.model_dump(mode="json")
             if await self._received(job_id, body.execution_id, "solver", data):
                 return
-            if (
-                row["stage"] != "solve"
-                or row["phase"] not in {"ready_for_next_stage", "needs_clarification"}
-                or row["execution_id"] != body.execution_id
-            ):
+            result = body.result
+            negative_margin = (
+                isinstance(result.estimate, Estimate) and result.estimate.margin_percent < 0
+            )
+            declined_result = (
+                result.status == "NO_SOLUTION"
+                and isinstance(result.recommendation, Recommendation)
+                and result.recommendation.value == "NOT_PARTICIPATE"
+            )
+            early_loss = (
+                (row["stage"], row["phase"]) == ("extract", "accepted")
+                and negative_margin
+                and declined_result
+            )
+            solving = row["stage"] == "solve" and row["phase"] in {
+                "ready_for_next_stage",
+                "needs_clarification",
+            }
+            if not (early_loss or solving) or row["execution_id"] != body.execution_id:
                 raise WorkflowError("stage_conflict")
             job = Job.model_validate(row["request"]["job"])
-            result = body.result
             if result.job_id != job_id or result.kb_version != job.kb_version:
                 raise WorkflowError("result_mismatch")
             if any(item.kb_version != job.kb_version for item in result.artifacts):
                 raise WorkflowError("result_mismatch")
+            mandatory = {item.requirement_id for item in result.requirements if item.mandatory}
+            unmet = any(
+                item.requirement_id in mandatory and item.status == "NOT_MET"
+                for item in result.compliance
+            )
+            uncovered = not result.resources or any(not item.covered for item in result.resources)
+            supply_unresolved = False
+            if not early_loss and uncovered:
+                confirmation = await (
+                    await self._connection.execute(
+                        """
+                        SELECT 1 FROM review_cards WHERE job_id = %s
+                        AND reason_code = 'RESOURCE_GAP' AND state = 'decided'
+                        AND action = 'continue' AND supply_confirmation IS NOT NULL LIMIT 1
+                        """,
+                        (job_id,),
+                    )
+                ).fetchone()
+                supply_unresolved = confirmation is not None
+            if negative_margin or unmet or supply_unresolved:
+                if not declined_result or result.artifacts:
+                    raise WorkflowError("result_mismatch")
+                await self._connection.execute(
+                    "UPDATE jobs SET solver_result = %s, pending_reasons = '{}' WHERE job_id = %s",
+                    (Jsonb(result.model_dump(mode="json")), job_id),
+                )
+                await self._save_receipt(job_id, body.execution_id, "solver", data)
+                if early_loss:
+                    await self._stage_event(job_id, "extract", "DONE")
+                await self._transition(job_id, "declined", "solve")
+                await self._stage_event(job_id, "solve", "DONE")
+                return
             reasons: list[StopReason] = list(
                 dict.fromkeys(
                     reason for reason in result.stop_reasons if reason != "FINAL_APPROVAL"
@@ -520,6 +626,9 @@ class JobStore:
                 reasons.append("NO_SOLUTION")
             elif not reasons:
                 reasons.append("UNCLEAR_REQUIREMENTS")
+            if "RESOURCE_GAP" in reasons:
+                reasons.remove("RESOURCE_GAP")
+                reasons.insert(0, "RESOURCE_GAP")
 
             review_round = row["review_round"] + 1
             await self._connection.execute(
@@ -559,6 +668,24 @@ class JobStore:
             if card["action"] == "stop":
                 await self._transition(job_id, "declined", "review")
                 await self._stage_event(job_id, "review", "FAILED")
+            elif (
+                card["action"] == "continue"
+                and reasons[0] == "RESOURCE_GAP"
+                and row["solver_result"]
+            ):
+                await self._connection.execute(
+                    "UPDATE jobs SET pending_reasons = '{}', solver_result = NULL WHERE job_id = %s",
+                    (job_id,),
+                )
+                await self._transition(
+                    job_id, "ready_for_next_stage", "solve", execution_id=uuid4()
+                )
+                await self._stage_event(job_id, "review", "DONE")
+            elif card["action"] == "continue" and not remaining and row["solver_result"] is None:
+                await self._transition(
+                    job_id, "ready_for_next_stage", "solve", execution_id=uuid4()
+                )
+                await self._stage_event(job_id, "review", "DONE")
             elif card["action"] == "needs_info" or (
                 not remaining and reasons[0] != "FINAL_APPROVAL"
             ):
@@ -830,6 +957,7 @@ def _public_card(row: DictRow) -> ReviewCard:
             "state": row["state"],
             "timeout": expired,
             "decision": decision,
+            "supply_confirmation": row["supply_confirmation"],
         }
     )
 

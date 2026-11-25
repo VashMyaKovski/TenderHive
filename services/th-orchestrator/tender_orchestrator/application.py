@@ -65,30 +65,38 @@ class Orchestrator:
     ) -> JobView:
         async with self._database.session() as store:
             await store.lock(job_id, wait=True)
-            role = await store.card_role(job_id, card_id)
+            card = await store.review_card(job_id, card_id)
+            role, reason = card.role, card.reason_code
             job = await store.job(job_id)
             allowed_role = role == actor.role or (
                 role == "TENDER_SPECIALIST"
                 and actor.role == "LAWYER"
-                and await store.card_reason(job_id, card_id) == "UNCLEAR_REQUIREMENTS"
+                and reason == "UNCLEAR_REQUIREMENTS"
             )
             if not allowed_role or job.job.profile_ref not in actor.profile_refs:
                 raise WorkflowError("access_denied")
+            if request.decision == "APPROVED":
+                if (reason == "RESOURCE_GAP") != (request.supply_confirmation is not None):
+                    raise WorkflowError("decision_evidence_required")
+                rationale_required = card.step.startswith("risk_") or reason in {
+                    "PENALTY_ABOVE_THRESHOLD",
+                    "LOW_MARGIN",
+                }
+                if rationale_required and not request.comment:
+                    raise WorkflowError("decision_evidence_required")
+            elif request.supply_confirmation is not None:
+                raise WorkflowError("decision_evidence_required")
             now = self._clock().astimezone(UTC)
-            if source is not None:
-                card = next(
-                    item for item in (await store.view(job_id)).cards if item.card_id == card_id
-                )
-                if (
-                    source.job_id != job_id
-                    or source.role != actor.role
-                    or source.reason_code != card.reason_code
-                    or source.deadline != card.deadline
-                    or source.timeout != card.timeout
-                    or source.question != card.question
-                    or not job.job.created_at <= source.decided_at <= now
-                ):
-                    raise WorkflowError("decision_conflict")
+            if source is not None and (
+                source.job_id != job_id
+                or source.role != actor.role
+                or source.reason_code != card.reason_code
+                or source.deadline != card.deadline
+                or source.timeout != card.timeout
+                or source.question != card.question
+                or not job.job.created_at <= source.decided_at <= now
+            ):
+                raise WorkflowError("decision_conflict")
             await store.expire(job_id, now)
             await store.record_decision(
                 job_id, card_id, actor, request, source.decided_at if source else now

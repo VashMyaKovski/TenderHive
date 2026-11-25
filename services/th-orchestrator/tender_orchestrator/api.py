@@ -48,6 +48,7 @@ _ERROR_STATUS: dict[ErrorCode, int] = {
     "access_denied": 403,
     "job_conflict": 409,
     "decision_conflict": 409,
+    "decision_evidence_required": 422,
     "stage_conflict": 409,
     "result_mismatch": 422,
 }

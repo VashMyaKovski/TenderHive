@@ -11,12 +11,17 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Command, interrupt
 
+from contracts.risk_task_v1 import HumanReason, RiskResultV1
 from tender_orchestrator.models import Clock, Role
 from tender_orchestrator.ports import AgentError, JobRepository, RiskAgent, agent_error
 
 _LOG = logging.getLogger("uvicorn.error.orchestrator")
 
 type Route = Literal["review", "finish", "fail"]
+
+
+def _review_reason(result: RiskResultV1) -> HumanReason | None:
+    return result.human_reason or ("unclear_requirements" if result.risk_level == "high" else None)
 
 
 class RiskState(TypedDict):
@@ -65,7 +70,7 @@ class RiskGraph:
 
     async def advance(self, store: JobRepository, job_id: UUID) -> None:
         record = await store.job(job_id)
-        if not record.needs_advance or record.risk is None:
+        if record.stage != "risk" or not record.needs_advance or record.risk is None:
             return
         thread_id = (
             str(job_id) if record.risk_generation == 0 else f"{job_id}:{record.risk_generation}"
@@ -97,7 +102,8 @@ class RiskGraph:
         job_id = UUID(state["job_id"])
         record = await store.job(job_id)
         if record.risk_result is not None:
-            return {"route": "review" if record.risk_result.human_reason else "finish"}
+            reason = record.risk_review or _review_reason(record.risk_result)
+            return {"route": "review" if reason else "finish"}
         failure = record.failure
         if record.risk is None:
             raise RuntimeError("risk input has not been recorded")
@@ -121,7 +127,7 @@ class RiskGraph:
                 await asyncio.sleep(self._retry_delay)
             else:
                 await store.save_result(job_id, result)
-                return {"route": "review" if result.human_reason else "finish"}
+                return {"route": "review" if _review_reason(result) else "finish"}
 
         if failure is None:
             await store.save_failure(
@@ -142,10 +148,11 @@ class RiskGraph:
         job_id = UUID(state["job_id"])
         record = await runtime.context.store.job(job_id)
         risk = record.risk_result
-        if risk is None or risk.human_reason is None:
+        reason = record.risk_review or (_review_reason(risk) if risk is not None else None)
+        if reason is None:
             raise RuntimeError("risk assessment has no review reason")
         await runtime.context.store.open_review(
-            job_id, risk.human_reason, self._role, self._clock().astimezone(UTC) + self._wait
+            job_id, reason, self._role, self._clock().astimezone(UTC) + self._wait
         )
         return {}
 
@@ -154,23 +161,21 @@ class RiskGraph:
         decision_id = interrupt({"job_id": state["job_id"], "step": "risk_review"})
         return {"decision_id": decision_id}
 
-    @staticmethod
-    async def _finish(state: RiskState, runtime: Runtime[GraphContext]) -> dict[str, str]:
+    async def _finish(self, state: RiskState, runtime: Runtime[GraphContext]) -> dict[str, str]:
         store = runtime.context.store
         job_id = UUID(state["job_id"])
         route = RiskGraph._route(state)
-        if route == "fail":
-            await store.set_phase(job_id, "failed")
-        elif route == "review":
+        if route == "review":
             decision = await store.recorded_decision(job_id)
             if decision is None or str(decision.decision_id) != state.get("decision_id"):
                 raise RuntimeError("review decision was not recorded")
             if decision.action == "stop":
                 await store.set_phase(job_id, "declined")
+                return {}
             elif decision.action == "needs_info":
                 await store.set_phase(job_id, "needs_clarification")
-            else:
-                await store.set_phase(job_id, "ready_for_next_stage")
-        else:
-            await store.set_phase(job_id, "ready_for_next_stage")
+                return {}
+        await store.finish_risk(
+            job_id, self._clock().astimezone(UTC) + self._wait, failed=route == "fail"
+        )
         return {}
