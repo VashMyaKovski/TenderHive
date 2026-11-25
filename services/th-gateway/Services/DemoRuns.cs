@@ -60,6 +60,7 @@ public sealed class DemoRuns(DemoWorkbenchClient workbench, DemoRunRegistry regi
                 throw new ApiException(403, "Эта карточка назначена другой роли.");
             }
 
+            ValidateReview(run.Card, input);
             var result = await workbench.DecideAsync(id, input with { Comment = input.Comment ?? "" }, ct);
             registry.RecordReviewer(id, actor);
             return Present(result, actor, access.IsOwner(actor));
@@ -67,6 +68,32 @@ public sealed class DemoRuns(DemoWorkbenchClient workbench, DemoRunRegistry regi
         finally
         {
             access.Decisions.Release();
+        }
+    }
+
+    private static void ValidateReview(DemoCardDto card, DemoDecisionInput input)
+    {
+        if (card.RequiresComment && string.IsNullOrWhiteSpace(input.Comment))
+        {
+            throw new ApiException(422, "Укажите обоснование согласования.");
+        }
+
+        if (card.Reason == "RESOURCE_GAP" && input.Decision == "APPROVED")
+        {
+            if (card.Supply?.DeliveryDeadline is null)
+            {
+                throw new ApiException(422, "Срок поставки не указан в исходных данных.");
+            }
+
+            if (input.SupplyConfirmation is not { Quantity: > 0, AdditionalCost: >= 0 } confirmation ||
+                confirmation.DeliveryDate == default)
+            {
+                throw new ApiException(422, "Укажите объём, дату и дополнительные затраты на поставку.");
+            }
+        }
+        else if (input.SupplyConfirmation is not null)
+        {
+            throw new ApiException(422, "Подтверждение поставки относится к карточке дефицита.");
         }
     }
 

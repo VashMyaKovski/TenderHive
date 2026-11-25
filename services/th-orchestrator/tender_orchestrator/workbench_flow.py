@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID, uuid4, uuid5
@@ -21,7 +21,7 @@ from tender_orchestrator.demo_flow import (
     _verify_content,
     agent,
 )
-from tender_orchestrator.models import JobView, ReviewCard
+from tender_orchestrator.models import JobView, ReviewCard, SupplyConfirmation
 from tender_orchestrator.workbench_inputs import (
     DEMO_MINIMUM_VALIDITY_WORKDAYS,
     DecisionInput,
@@ -91,6 +91,23 @@ class Run:
             return "failed"
         return self.view.phase if self.view is not None else "queued"
 
+    @staticmethod
+    def is_risk_review(card: ReviewCard) -> bool:
+        return card.step.startswith("risk_") or card.reason_code == "PENALTY_ABOVE_THRESHOLD"
+
+    def requires_comment(self, card: ReviewCard) -> bool:
+        return self.is_risk_review(card) or card.reason_code == "LOW_MARGIN"
+
+    def supply_requirement(self, card: ReviewCard) -> dict[str, object] | None:
+        if card.reason_code != "RESOURCE_GAP":
+            return None
+        return {
+            "shortage": decimal_text(
+                max(Decimal(0), self.facts.quantity - self.facts.available_quantity)
+            ),
+            "delivery_deadline": self.facts.delivery_deadline,
+        }
+
     def message(
         self,
         sender: str,
@@ -116,6 +133,7 @@ class Run:
         view = self.view
         result = view.solver_result if view is not None else None
         failure = view.failure if view is not None else None
+        confirmation = _supply_confirmation(view) if view is not None else None
         return {
             "id": str(self.id),
             "title": self.title,
@@ -126,17 +144,33 @@ class Run:
                 {"name": upload.document.name, "size": len(upload.data)} for upload in self.uploads
             ],
             "messages": self.messages,
-            "recommendation": _recommendation(result) if result is not None else None,
+            "recommendation": _recommendation(result, self.facts, confirmation)
+            if result is not None
+            else None,
             "card": (
                 {
                     "id": str(card.card_id),
                     "reason": card.reason_code,
                     "role": card.role,
                     "question": card.question,
+                    "requires_comment": self.requires_comment(card),
+                    "supply": self.supply_requirement(card),
                 }
                 if card and self.error is None and not self.is_running
                 else None
             ),
+            "risk_decisions": [
+                {
+                    "reason": review.reason_code,
+                    "role": review.decision.role,
+                    "decision": {"continue": "APPROVED", "stop": "REJECTED"}.get(
+                        review.decision.decision, review.decision.decision
+                    ),
+                    "comment": review.decision.comment,
+                }
+                for review in (view.cards if view is not None else [])
+                if self.is_risk_review(review) and review.decision is not None
+            ],
             "artifacts": [
                 {"name": name, "url": f"/api/workbench/runs/{self.id}/artifacts/{name}"}
                 for name in self.artifacts
@@ -147,7 +181,20 @@ class Run:
         }
 
 
-def _recommendation(result: SolverResult) -> dict[str, object]:
+def _supply_confirmation(view: JobView) -> SupplyConfirmation | None:
+    return next(
+        (
+            card.supply_confirmation
+            for card in reversed(view.cards)
+            if card.reason_code == "RESOURCE_GAP" and card.supply_confirmation is not None
+        ),
+        None,
+    )
+
+
+def _recommendation(
+    result: SolverResult, facts: Facts, confirmation: SupplyConfirmation | None
+) -> dict[str, object]:
     recommendation = result.recommendation
     reasons = [_REASONS[reason] for reason in result.stop_reasons]
     for item in result.compliance:
@@ -165,6 +212,21 @@ def _recommendation(result: SolverResult) -> dict[str, object]:
             f"Расчётная маржа {result.estimate.margin_percent:.2f}%, "
             f"порог {result.estimate.threshold:g}%."
         )
+        if result.estimate.margin_percent < 0:
+            loss = result.estimate.total_cost - result.estimate.offer_price
+            reasons.append(f"Расчётный убыток {loss:.2f} BYN.")
+    if confirmation is not None and facts.delivery_deadline is not None:
+        if confirmation.delivery_date > facts.delivery_deadline:
+            reasons.append(
+                f"Подтверждённая дата {confirmation.delivery_date:%d.%m.%Y} позже "
+                f"крайнего срока {facts.delivery_deadline:%d.%m.%Y}."
+            )
+        else:
+            reasons.append(
+                f"Подтверждён объём {confirmation.quantity:g} ед. на "
+                f"{confirmation.delivery_date:%d.%m.%Y}. "
+                f"Дополнительные затраты — {confirmation.additional_cost:.2f} BYN."
+            )
     reasons.extend(item.basis for item in result.risks)
     if not reasons:
         reasons.append("В отчёте решателя нет дополнительных пояснений.")
@@ -260,11 +322,19 @@ async def _solve(
     http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run, view: JobView
 ) -> JobView:
     facts = run.facts
+    confirmation = _supply_confirmation(view)
+    deadline = facts.delivery_deadline
+    effective_available = facts.available_quantity
+    if confirmation is not None and deadline is not None and confirmation.delivery_date <= deadline:
+        effective_available = min(
+            max(facts.available_quantity, facts.quantity),
+            effective_available + confirmation.quantity,
+        )
     source = _source(run)
     position = {
         "position_id": "uploaded-lot",
         "required_quantity": decimal_text(facts.quantity),
-        "available_quantity": decimal_text(facts.available_quantity),
+        "available_quantity": decimal_text(effective_available),
         "source": source,
     }
     specialists = await asyncio.gather(
@@ -341,10 +411,16 @@ async def _solve(
                             "position_id": position["position_id"],
                             "description": run.title,
                             "quantity": position["required_quantity"],
-                            "available": position["available_quantity"],
+                            "available": decimal_text(facts.available_quantity),
                             "unit_cost": decimal_text(facts.unit_cost),
                             "offer_unit_price": decimal_text(facts.offer_price / facts.quantity),
-                            "supply_deadline": None,
+                            "offer_total_price": decimal_text(facts.offer_price),
+                            "supply_deadline": datetime.combine(deadline, time.min, UTC).isoformat()
+                            if deadline is not None
+                            else None,
+                            "supply_confirmation": confirmation.model_dump(mode="json")
+                            if confirmation is not None
+                            else None,
                             "alternatives": [],
                         }
                     ],
@@ -484,6 +560,9 @@ async def _start(http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run)
     run.extraction = await _ask(
         http, settings, run, view, "extraction", {"requirements": [_requirement(run)]}
     )
+    if run.facts.offer_price < run.facts.quantity * run.facts.unit_cost:
+        run.view = await _solve(http, settings, run, view)
+        return
     run.message("orchestrator", "risk", "SENT", "Оценка открытого фрагмента", None)
     run.view = await _post_job(
         http,
@@ -536,10 +615,21 @@ async def work_run(
                     "decision_id": str(uuid5(card.card_id, "web-decision")),
                     "decision": body.decision,
                     "comment": body.comment,
+                    "supply_confirmation": body.supply_confirmation.model_dump(mode="json")
+                    if body.supply_confirmation is not None
+                    else None,
                 },
                 settings.reviewer_tokens[card.role],
             )
-            run.message("operator", "orchestrator", body.decision, card.question, None)
+            run.message(
+                "operator",
+                "orchestrator",
+                body.decision,
+                card.question,
+                body.supply_confirmation.model_dump(mode="json")
+                if body.supply_confirmation is not None
+                else None,
+            )
             await _advance(http, settings, run)
     except Exception as error:
         _LOG.warning("workbench run_id=%s failure=%s", run.id, type(error).__name__)

@@ -52,6 +52,45 @@ public sealed class DemoRunsTests
     }
 
     [Fact]
+    public async Task Supply_approval_requires_the_assigned_role_and_passes_the_confirmation()
+    {
+        var deadline = new DateOnly(2026, 12, 10);
+        using var fixture = new DemoFixture(new DemoCardDto(Guid.NewGuid(), "RESOURCE_GAP", "SUPPLY", "Supply?",
+            Supply: new DemoSupplyRequirementDto("400", deadline)));
+        var procurement = new UserContext("procurement", AppRole.Procurement);
+        var approval = new DemoDecisionInput(fixture.Run.Card!.Id, "APPROVED");
+        var confirmation = new DemoSupplyConfirmation(400, deadline.AddDays(-1), 150);
+
+        var missing = await Assert.ThrowsAsync<ApiException>(() => fixture.Runs.DecideAsync(
+            fixture.Run.Id, approval, procurement, CancellationToken.None));
+        var wrongRole = await Assert.ThrowsAsync<ApiException>(() => fixture.Runs.DecideAsync(
+            fixture.Run.Id, approval with { SupplyConfirmation = confirmation }, Owner, CancellationToken.None));
+        Assert.Equal(422, missing.StatusCode);
+        Assert.Equal(403, wrongRole.StatusCode);
+        Assert.Equal(0, fixture.DecisionCount);
+
+        await fixture.Runs.DecideAsync(fixture.Run.Id,
+            approval with { SupplyConfirmation = confirmation }, procurement, CancellationToken.None);
+        Assert.Equal(confirmation, fixture.SubmittedDecision?.SupplyConfirmation);
+    }
+
+    [Fact]
+    public async Task Risk_approval_requires_and_passes_a_reason()
+    {
+        using var fixture = new DemoFixture(new DemoCardDto(Guid.NewGuid(), "PENALTY_ABOVE_THRESHOLD",
+            "LAWYER", "Accept the risk?", RequiresComment: true));
+        var approval = new DemoDecisionInput(fixture.Run.Card!.Id, "APPROVED");
+        var missing = await Assert.ThrowsAsync<ApiException>(() => fixture.Runs.DecideAsync(
+            fixture.Run.Id, approval, Reviewer, CancellationToken.None));
+        Assert.Equal(422, missing.StatusCode);
+        Assert.Equal(0, fixture.DecisionCount);
+
+        await fixture.Runs.DecideAsync(fixture.Run.Id,
+            approval with { Comment = "Accepted under the agreed penalty cap." }, Reviewer, CancellationToken.None);
+        Assert.Equal("Accepted under the agreed penalty cap.", fixture.SubmittedDecision?.Comment);
+    }
+
+    [Fact]
     public async Task Only_done_runs_yield_the_original_files_to_the_owner()
     {
         using var fixture = new DemoFixture();
@@ -122,11 +161,12 @@ public sealed class DemoRunsTests
         public bool RunExpired { get; init; }
         public int DecisionCount { get; private set; }
         public int DownloadCount { get; private set; }
+        public DemoDecisionInput? SubmittedDecision { get; private set; }
 
-        public DemoFixture()
+        public DemoFixture(DemoCardDto? card = null)
         {
             Run = new DemoRunDto(Guid.NewGuid(), "Fixture", "WAITING_HUMAN", "waiting",
-                Guid.NewGuid(), [], [], null, new DemoCardDto(Guid.NewGuid(), "review", "LAWYER", "Approve?"),
+                Guid.NewGuid(), [], [], null, card ?? new DemoCardDto(Guid.NewGuid(), "review", "LAWYER", "Approve?"),
                 [new DemoArtifactDto("offer.pdf", "/internal/file")], null);
             var registry = new DemoRunRegistry(_grantsFile);
             registry.Add(Run.Id, Owner);
@@ -150,6 +190,7 @@ public sealed class DemoRunsTests
             {
                 var sent = await request.Content!.ReadFromJsonAsync<DemoDecisionInput>(JsonContract.Options, ct);
                 Assert.Equal(Run.Card?.Id, sent?.CardId);
+                SubmittedDecision = sent;
                 DecisionCount++;
                 Run = Run with { Card = null, Phase = "running" };
             }

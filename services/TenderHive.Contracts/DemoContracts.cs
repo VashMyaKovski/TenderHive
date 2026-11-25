@@ -10,12 +10,16 @@ public sealed record DemoFacts(
     decimal UnitCost,
     decimal OfferPrice,
     decimal AvailableQuantity,
-    decimal? PenaltyDailyPercent = null);
+    decimal? PenaltyDailyPercent = null,
+    DateOnly? DeliveryDeadline = null);
 
 public sealed record DemoRunInput(
     string Title, IReadOnlyList<DemoAttachment> Documents, DemoFacts Facts, string Context);
 
-public sealed record DemoDecisionInput(Guid CardId, string Decision, string? Comment = null);
+public sealed record DemoSupplyConfirmation(decimal Quantity, DateOnly DeliveryDate, decimal AdditionalCost);
+
+public sealed record DemoDecisionInput(
+    Guid CardId, string Decision, string? Comment = null, DemoSupplyConfirmation? SupplyConfirmation = null);
 
 public sealed record DemoDocumentDto(string Name, long Size);
 
@@ -25,7 +29,14 @@ public sealed record DemoMessageDto(
 public sealed record DemoRecommendationDto(
     string Value, string Status, IReadOnlyList<string> Reasons, IReadOnlyList<string> Conditions);
 
-public sealed record DemoCardDto(Guid Id, string Reason, string Role, string Question, bool CanDecide = false);
+public sealed record DemoSupplyRequirementDto(
+    string Shortage, DateOnly? DeliveryDeadline);
+
+public sealed record DemoCardDto(
+    Guid Id, string Reason, string Role, string Question, bool CanDecide = false,
+    DemoSupplyRequirementDto? Supply = null, bool RequiresComment = false);
+
+public sealed record DemoRiskDecisionDto(string Reason, string Role, string Decision, string Comment);
 
 public sealed record DemoArtifactDto(string Name, string Url);
 
@@ -40,4 +51,5 @@ public sealed record DemoRunDto(
     DemoRecommendationDto? Recommendation,
     DemoCardDto? Card,
     IReadOnlyList<DemoArtifactDto> Artifacts,
-    string? Error);
+    string? Error,
+    IReadOnlyList<DemoRiskDecisionDto>? RiskDecisions = null);

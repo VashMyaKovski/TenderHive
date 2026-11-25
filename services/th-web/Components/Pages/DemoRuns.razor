@@ -53,6 +53,13 @@
                                 <input id="demo-available" type="number" min="0" step="any" @bind="available" required />
                             </div>
                             <div>
+                                <label for="demo-delivery-deadline">Крайняя дата поставки</label>
+                                <input id="demo-delivery-deadline" name="delivery-deadline" type="date"
+                                       autocomplete="off" @bind="deliveryDeadline"
+                                       required="@(available < quantity)" aria-describedby="demo-delivery-hint" />
+                                <p id="demo-delivery-hint" class="muted hint">Нужна, если требуется дозаказ.</p>
+                            </div>
+                            <div>
                                 <label for="demo-validity">Срок действия предложения, рабочих дней</label>
                                 <input id="demo-validity" type="number" min="0" max="3650" @bind="validity" required />
                             </div>
@@ -172,12 +179,47 @@
                             <h2 id="decision-heading">Требуется согласование</h2>
                             <p>@card.Question</p>
                             <p class="muted">Ответственный: @ReviewerLabel(card.Role)</p>
+                            @if (card.Supply is { } supply)
+                            {
+                                <p>Не хватает @supply.Shortage ед.</p>
+                                @if (supply.DeliveryDeadline is { } deadline)
+                                {
+                                    <p>Крайняя дата поставки <time datetime="@deadline.ToString("O")">@DateLabel(deadline)</time>.</p>
+                                }
+                                else
+                                {
+                                    <p>Чтобы согласовать дозаказ, укажите крайний срок поставки в новом прогоне.</p>
+                                }
+                            }
                             @if (card.CanDecide)
                             {
+                                @if (card.Supply?.DeliveryDeadline is not null)
+                                {
+                                    <div class="row demo-facts" role="group" aria-label="Подтверждённая поставка">
+                                        <div>
+                                            <label for="decision-supply-quantity">Подтверждённое количество</label>
+                                            <input id="decision-supply-quantity" name="supply-quantity" autocomplete="off"
+                                                   type="number" inputmode="decimal" min="0" step="any" @bind="confirmedQuantity" />
+                                        </div>
+                                        <div>
+                                            <label for="decision-supply-date">Дата поставки</label>
+                                            <input id="decision-supply-date" name="supply-date" autocomplete="off"
+                                                   type="date" @bind="confirmedDeliveryDate" />
+                                        </div>
+                                        <div>
+                                            <label for="decision-supply-cost">Дополнительные затраты, BYN</label>
+                                            <input id="decision-supply-cost" name="supply-cost" autocomplete="off"
+                                                   type="number" inputmode="decimal" min="0" step="any" @bind="additionalCost" />
+                                        </div>
+                                    </div>
+                                }
                                 <label for="decision-comment">Комментарий</label>
-                                <textarea id="decision-comment" rows="2" maxlength="1000" @bind="comment" @bind:event="oninput"></textarea>
+                                <textarea id="decision-comment" name="comment" autocomplete="off"
+                                          rows="2" maxlength="1000" @bind="comment"
+                                          @bind:event="oninput" required="@card.RequiresComment"></textarea>
                                 <div class="dashboard-actions">
-                                    <button class="primary" type="button" disabled="@busy" @onclick='() => DecideAsync(card.Id, "APPROVED")'>Согласовать</button>
+                                    <button class="primary" type="button" disabled="@(busy || card.Supply is { DeliveryDeadline: null })"
+                                            @onclick='() => DecideAsync(card.Id, "APPROVED")'>@(card.Supply is null ? "Согласовать" : "Подтвердить поставку")</button>
                                     <button class="danger" type="button" disabled="@busy" @onclick='() => DecideAsync(card.Id, "REJECTED")'>Отклонить</button>
                                 </div>
                             }
@@ -213,6 +255,23 @@
                         else
                         {
                             <p class="muted">Рекомендация пока не сформирована.</p>
+                        }
+                        @if (active.RiskDecisions is { Count: > 0 } reviews)
+                        {
+                            <h3>Решения по договорному риску</h3>
+                            <ul class="reason-list">
+                                @foreach (var review in reviews)
+                                {
+                                    <li>
+                                        <strong>@ReviewerLabel(review.Role) · @MessageLabel(review.Decision)</strong>
+                                        <div>@ConditionLabel(review.Reason)</div>
+                                        @if (review.Comment.Length > 0)
+                                        {
+                                            <div>@review.Comment</div>
+                                        }
+                                    </li>
+                                }
+                            </ul>
                         }
                     </section>
 

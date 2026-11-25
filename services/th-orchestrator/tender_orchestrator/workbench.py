@@ -165,6 +165,18 @@ def create_app(settings: WorkbenchSettings) -> FastAPI:
             or (body.card_id is not None and body.card_id != card.card_id)
         ):
             raise HTTPException(status_code=409, detail="Карточка уже изменилась или закрыта.")
+        if run.requires_comment(card) and not body.comment:
+            raise HTTPException(status_code=422, detail="Укажите обоснование согласования.")
+        if card.reason_code == "RESOURCE_GAP" and body.decision == "APPROVED":
+            if run.facts.delivery_deadline is None or body.supply_confirmation is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Укажите срок, объём, дату и дополнительные затраты на поставку.",
+                )
+        elif body.supply_confirmation is not None:
+            raise HTTPException(
+                status_code=422, detail="Подтверждение поставки относится к карточке дефицита."
+            )
         run.task = asyncio.create_task(work_run(settings, run, (card, body)))
         return run.snapshot()
 

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -15,6 +16,7 @@ public partial class DemoRuns
     private const int MaxFileBytes = 2 * 1024 * 1024;
     private const int MaxBatchBytes = 5 * 1024 * 1024;
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
+    private static readonly CultureInfo DashboardCulture = CultureInfo.GetCultureInfo("ru-BY");
 
     [Parameter] public Guid? RunId { get; set; }
 
@@ -35,8 +37,11 @@ public partial class DemoRuns
     private string title = string.Empty;
     private string context = string.Empty;
     private decimal? quantity, available, unitCost, offerPrice, penalty;
+    private DateOnly? deliveryDeadline;
     private int? validity;
     private string comment = string.Empty;
+    private decimal? confirmedQuantity, additionalCost;
+    private DateOnly? confirmedDeliveryDate;
 
     protected override async Task OnParametersSetAsync()
     {
@@ -69,6 +74,9 @@ public partial class DemoRuns
         loadError = null;
         actionError = null;
         comment = string.Empty;
+        confirmedQuantity = null;
+        additionalCost = null;
+        confirmedDeliveryDate = null;
 
         await RefreshAsync(token);
         if (RunId is not null && !token.IsCancellationRequested)
@@ -249,6 +257,7 @@ public partial class DemoRuns
         unitCost = 4.50m;
         offerPrice = 5577.60m;
         penalty = 0.15m;
+        deliveryDeadline = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(30));
         context = "The published draft includes a daily penalty for late delivery.";
         formError = null;
 
@@ -275,11 +284,18 @@ public partial class DemoRuns
             return;
         }
 
+        if (available < quantity && deliveryDeadline is null)
+        {
+            formError = "Укажите крайний срок поставки, чтобы согласовать дозаказ.";
+            return;
+        }
+
         var token = page?.Token ?? CancellationToken.None;
         busy = true;
         try
         {
-            var facts = new DemoFacts(quantity.Value, validity.Value, unitCost.Value, offerPrice.Value, available.Value, penalty);
+            var facts = new DemoFacts(quantity.Value, validity.Value, unitCost.Value, offerPrice.Value,
+                available.Value, penalty, deliveryDeadline);
             var created = await Gateway.StartDemoRunAsync(
                 new DemoRunInput(title.Trim(), [.. files], facts, context.Trim()), token);
             if (!token.IsCancellationRequested)
@@ -314,7 +330,7 @@ public partial class DemoRuns
 
     private async Task DecideAsync(Guid cardId, string decision)
     {
-        if (run is not { } active || busy)
+        if (run is not { Card: { } card } active || card.Id != cardId || busy)
         {
             return;
         }
@@ -325,9 +341,29 @@ public partial class DemoRuns
             return;
         }
 
+        if (card.RequiresComment && string.IsNullOrWhiteSpace(comment))
+        {
+            actionError = "Укажите обоснование согласования.";
+            return;
+        }
+
+        DemoSupplyConfirmation? supply = null;
+        if (decision == "APPROVED" && card.Reason == "RESOURCE_GAP")
+        {
+            if (card.Supply?.DeliveryDeadline is null || confirmedQuantity is null or <= 0 ||
+                confirmedDeliveryDate is null || additionalCost is null or < 0)
+            {
+                actionError = "Укажите объём, дату и дополнительные затраты на поставку.";
+                return;
+            }
+
+            supply = new DemoSupplyConfirmation(confirmedQuantity.Value, confirmedDeliveryDate.Value, additionalCost.Value);
+        }
+
         await RunActionAsync(async token =>
         {
-            var updated = await Gateway.DecideDemoRunAsync(active.Id, new DemoDecisionInput(cardId, decision, comment.Trim()), token);
+            var updated = await Gateway.DecideDemoRunAsync(
+                active.Id, new DemoDecisionInput(cardId, decision, comment.Trim(), supply), token);
             if (!token.IsCancellationRequested)
             {
                 runRevision++;
@@ -392,6 +428,9 @@ public partial class DemoRuns
         if (run?.Card?.Id != updated.Card?.Id)
         {
             comment = string.Empty;
+            confirmedQuantity = null;
+            additionalCost = null;
+            confirmedDeliveryDate = null;
         }
 
         run = updated;
@@ -405,6 +444,8 @@ public partial class DemoRuns
     }
 
     public void Dispose() => DisposePage();
+
+    private static string DateLabel(DateOnly date) => date.ToString("d", DashboardCulture);
 
     private static string StatusLabel(string status, string phase) => (status, phase) switch
     {

@@ -2,6 +2,7 @@ import json
 from base64 import b64decode
 from binascii import Error as Base64Error
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from hashlib import sha256
 from io import BytesIO
@@ -16,6 +17,7 @@ from pypdf.errors import PdfReadError
 from contracts.agent_task import PositiveQuantity, Quantity
 from contracts.models import Contract, Document
 from contracts.risk_task_v1 import Percent
+from tender_orchestrator.models import SupplyConfirmation
 
 MAX_FILE_BYTES = 2 * 1024**2
 MAX_UPLOAD_BYTES = 5 * 1024**2
@@ -40,6 +42,7 @@ class Facts(Contract):
     offer_price: PositiveQuantity
     available_quantity: Quantity
     penalty_daily_percent: Percent | None = None
+    delivery_deadline: date | None = None
 
 
 class RunInput(Contract):
@@ -53,6 +56,7 @@ class DecisionInput(Contract):
     decision: Literal["APPROVED", "REJECTED"]
     comment: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] = ""
     card_id: UUID | None = None
+    supply_confirmation: SupplyConfirmation | None = None
 
 
 @dataclass(frozen=True, slots=True)
