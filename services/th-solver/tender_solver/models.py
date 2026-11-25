@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
-from contracts.agent_task import AgentResult
+from contracts.agent_task import AgentResult, PositiveQuantity, Quantity
 from contracts.models import Contract, NonEmpty, Requirement, UtcDatetime
 from pydantic import Field, JsonValue, model_validator
 
@@ -28,6 +28,12 @@ class KnowledgeFact(Contract):
     value_type: str | None = None
 
 
+class SupplyConfirmation(Contract):
+    quantity: PositiveQuantity
+    delivery_date: date
+    additional_cost: Quantity
+
+
 class Position(Contract):
     position_id: NonEmpty
     description: NonEmpty
@@ -35,7 +41,9 @@ class Position(Contract):
     available: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
     unit_cost: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
     offer_unit_price: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
-    supply_deadline: UtcDatetime | None
+    offer_total_price: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)] | None = None
+    supply_deadline: UtcDatetime | None = None
+    supply_confirmation: SupplyConfirmation | None = None
     alternatives: list[JsonValue]
 
 

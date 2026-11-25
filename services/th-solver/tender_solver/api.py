@@ -112,7 +112,7 @@ def create_app(settings: Settings, transport: httpx.AsyncBaseTransport | None = 
             return _error(body.trace_id, 502, "KB_VERSION_MISMATCH")
 
         fingerprint = sha256(body.model_dump_json(exclude={"trace_id"}).encode()).hexdigest()
-        cache_key = f"solver:result:{settings.margin_threshold_percent}:{fingerprint}"
+        cache_key = f"solver:result:v2:{settings.margin_threshold_percent}:{fingerprint}"
         result = None
         if evaluation_token is None:
             try:

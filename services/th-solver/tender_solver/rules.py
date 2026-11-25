@@ -18,7 +18,15 @@ from contracts.models import (
 )
 from pydantic import JsonValue, ValidationError
 
-from tender_solver.models import Condition, Consequence, Fact, KnowledgeFact, Scalar, SolveRequest
+from tender_solver.models import (
+    Condition,
+    Consequence,
+    Fact,
+    KnowledgeFact,
+    Position,
+    Scalar,
+    SolveRequest,
+)
 
 _COMPARISONS = {"gt": gt, "gte": ge, "lt": lt, "lte": le}
 
@@ -39,6 +47,37 @@ def _matches(actual: Scalar, condition: Condition) -> bool:
     if isinstance(actual, bool) or isinstance(expected, bool):
         return False
     return _COMPARISONS[condition.op](actual, expected)
+
+
+def _check_resources(
+    positions: list[Position],
+) -> tuple[list[ResourceCheck], Decimal, bool]:
+    resources: list[ResourceCheck] = []
+    additional_cost = Decimal(0)
+    confirmation_failed = False
+    for position in positions:
+        available = position.available
+        confirmation = position.supply_confirmation
+        if (
+            confirmation is not None
+            and position.supply_deadline is not None
+            and confirmation.delivery_date <= position.supply_deadline.date()
+        ):
+            available += confirmation.quantity
+            additional_cost += confirmation.additional_cost
+        shortage = max(position.quantity - available, Decimal(0))
+        if shortage and confirmation is not None:
+            confirmation_failed = True
+        resources.append(
+            ResourceCheck(
+                position_id=position.position_id,
+                covered=shortage == 0,
+                shortage=str(shortage),
+                supply_deadline=position.supply_deadline,
+                alternatives=position.alternatives,
+            )
+        )
+    return resources, additional_cost, confirmation_failed
 
 
 def solve(
@@ -153,37 +192,46 @@ def solve(
                 entry["fact_id"] = knowledge_ids[fact.fact_id]
             trace.append(entry)
 
-    resources = [
-        ResourceCheck(
-            position_id=p.position_id,
-            covered=p.available >= p.quantity,
-            shortage=str(max(p.quantity - p.available, 0)),
-            supply_deadline=p.supply_deadline,
-            alternatives=p.alternatives,
-        )
-        for p in request.profile.positions
-    ]
-    if any(not row.covered for row in resources):
+    positions = request.profile.positions
+    resources, additional_cost, confirmation_failed = _check_resources(positions)
+    shortage = any(not row.covered for row in resources)
+    if confirmation_failed:
+        reasons.add("NO_SOLUTION")
+    elif shortage:
         reasons.add("RESOURCE_GAP")
-    offer = sum((p.quantity * p.offer_unit_price for p in request.profile.positions), Decimal(0))
-    cost = sum((p.quantity * p.unit_cost for p in request.profile.positions), Decimal(0))
+    offer = sum(
+        (
+            position.offer_total_price
+            if position.offer_total_price is not None
+            else position.quantity * position.offer_unit_price
+            for position in positions
+        ),
+        Decimal(0),
+    )
+    cost = sum((position.quantity * position.unit_cost for position in positions), additional_cost)
+    loss_making = cost > offer
     estimate: Estimate | EmptyResultPart = EmptyResultPart()
     if offer:
-        margin = (offer - cost) * 100 / offer
+        margin_numerator = (offer - cost) * 100
         estimate = Estimate(
-            positions=[p.model_dump(mode="json") for p in request.profile.positions],
+            positions=[position.model_dump(mode="json") for position in positions],
             total_cost=cost,
             offer_price=offer,
-            margin_percent=margin,
+            margin_percent=margin_numerator / offer,
             threshold=margin_floor,
             threshold_source="SOLVER_MARGIN_THRESHOLD_PERCENT",
         )
-        if margin < margin_floor:
+        if loss_making:
+            reasons.add("NO_SOLUTION")
+        elif margin_numerator < margin_floor * offer:
             reasons.add("LOW_MARGIN")
     else:
         reasons.add("NO_SOLUTION")
 
     risks: list[Risk] = []
+    has_supply_confirmation = any(
+        position.supply_confirmation is not None for position in positions
+    )
     for result in request.agent_results:
         trace.append(
             {
@@ -198,9 +246,11 @@ def solve(
                 reasons.add("UNCLEAR_REQUIREMENTS")
             elif result.status == "NEEDS_REVIEW":
                 if result.agent_role in {"resource", "supply"}:
-                    reasons.add("RESOURCE_GAP")
+                    if not has_supply_confirmation:
+                        reasons.add("RESOURCE_GAP")
                 elif result.agent_role == "estimate":
-                    reasons.add("LOW_MARGIN")
+                    if not loss_making:
+                        reasons.add("LOW_MARGIN")
                 else:
                     reasons.add("UNCLEAR_REQUIREMENTS")
             continue
@@ -208,10 +258,12 @@ def solve(
             reasons.add("UNCLEAR_REQUIREMENTS")
             continue
         reason = result.result.get("human_reason")
-        if reason == "penalty_above_threshold":
-            reasons.add("PENALTY_ABOVE_THRESHOLD")
-        elif result.status == "NEEDS_REVIEW":
-            reasons.add("UNCLEAR_REQUIREMENTS")
+        if result.status == "NEEDS_REVIEW":
+            reasons.add(
+                "PENALTY_ABOVE_THRESHOLD"
+                if reason == "penalty_above_threshold"
+                else "UNCLEAR_REQUIREMENTS"
+            )
         summary, level = result.result.get("summary"), result.result.get("risk_level")
         if isinstance(summary, str) and isinstance(level, str):
             risks.append(
