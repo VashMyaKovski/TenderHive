@@ -61,6 +61,10 @@ class ApiSettings(Settings):
     port: Annotated[int, Field(ge=1, le=65_535)]
     api_mode: Literal["fixture", "live"]
     kb_version: Version
+    solver_url: HttpUrl | None = None
+    kb_eval_token: SecretStr | None = None
+    orchestrator_url: HttpUrl | None = None
+    orchestrator_token: SecretStr | None = None
 
     @field_validator("postgres_dsn")
     @classmethod
