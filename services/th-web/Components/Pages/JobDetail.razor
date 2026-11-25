@@ -1,0 +1,306 @@
+@page "/jobs/{JobId:guid}"
+@inject GatewayClient Gateway
+@inject SessionState Session
+@inject NavigationManager Navigation
+
+<a class="muted" href="/">← К списку заданий</a>
+
+<h1>Задание @JobId</h1>
+
+@if (error is not null)
+{
+    <p class="error">@error</p>
+}
+
+@if (detail is not null)
+{
+    <section class="card">
+        <div class="row">
+            <div><span class="muted">Статус</span><div><span class="@DisplayText.StatusClass(detail.Job.Status)">@DisplayText.Status(detail.Job.Status)</span></div></div>
+            <div><span class="muted">Создано</span><div>@DisplayText.Utc(detail.Job.CreatedAt) UTC</div></div>
+            <div><span class="muted">Источник</span><div>@DisplayText.Source(detail.Job.Source)</div></div>
+            <div><span class="muted">Версия БЗ</span><div class="mono">@detail.Job.KbVersion</div></div>
+            <div><span class="muted">Профиль</span><div class="mono">@detail.Job.ProfileRef</div></div>
+            <div><span class="muted">Маржа</span><div>@(detail.Job.MarginPercent is null ? "—" : $"{detail.Job.MarginPercent:0.#} %")</div></div>
+        </div>
+        <p class="muted mono">Идемпотентный ключ: @detail.Job.IdempotencyKey</p>
+    </section>
+
+    <section class="card">
+        <h2>Выполняемые шаги</h2>
+        @if (detail.Steps.Count == 0)
+        {
+            <p class="muted">Шаги обработки ещё не поступали.</p>
+        }
+        else
+        {
+            <ol class="steps">
+                @foreach (var step in detail.Steps)
+                {
+                    <li>
+                        <span class="badge @(step.State == "finished" ? "ok" : "info")">@step.State</span>
+                        <strong>@step.Title</strong>
+                        <span class="muted mono">@step.Code</span>
+                        <div class="muted">@DisplayText.Utc(step.StartedAt) UTC @(step.FinishedAt is null ? "" : $"→ {DisplayText.Utc(step.FinishedAt.Value)} UTC")</div>
+                        @if (!string.IsNullOrWhiteSpace(step.Detail))
+                        {
+                            <div>@step.Detail</div>
+                        }
+                    </li>
+                }
+            </ol>
+        }
+    </section>
+
+    <section class="card">
+        <h2>Результат решения</h2>
+        @if (result is null)
+        {
+            <p class="muted">Результат ещё не поступил от оркестратора.</p>
+        }
+        else
+        {
+            <div class="row">
+                <div><span class="muted">Рекомендация</span><div>@(result.Recommendation?.Decision ?? "—")</div></div>
+                <div><span class="muted">Обоснование</span><div>@(result.Recommendation?.Rationale ?? "—")</div></div>
+                <div><span class="muted">Стоимость</span><div>@(result.Estimate is null ? "—" : $"{result.Estimate.Total:0.##}")</div></div>
+                <div><span class="muted">Маржа / порог</span><div>@(result.Estimate is null ? "—" : $"{result.Estimate.MarginPercent:0.#} % / {result.Estimate.MarginThreshold:0.#} %")</div></div>
+                <div><span class="muted">Покрытие ресурсов</span><div>@(result.Resources is null ? "—" : $"{result.Resources.Coverage:P0}")</div></div>
+            </div>
+
+            @if (result.Compliance is not null && result.Compliance.Violated.Count > 0)
+            {
+                <h3>Нарушенные требования</h3>
+                <ul class="list">
+                    @foreach (var requirement in result.Compliance.Violated)
+                    {
+                        <li><span class="mono">@requirement.Code</span> — @requirement.Text <span class="muted mono">@requirement.SourceRef</span></li>
+                    }
+                </ul>
+            }
+
+            @if (result.Resources is not null && result.Resources.Deficits.Count > 0)
+            {
+                <h3>Дефицит ресурсов</h3>
+                <ul class="list">
+                    @foreach (var gap in result.Resources.Deficits)
+                    {
+                        <li><span class="mono">@gap.PositionCode</span> — @gap.Title: требуется @gap.Required, доступно @gap.Available @(string.IsNullOrWhiteSpace(gap.Supplier) ? "" : $"({gap.Supplier})")</li>
+                    }
+                </ul>
+            }
+
+            @if (result.Risks.Count > 0)
+            {
+                <h3>Риски</h3>
+                <table class="grid">
+                    <thead>
+                    <tr>
+                        <th>Код</th>
+                        <th>Категория</th>
+                        <th>Уровень</th>
+                        <th>Следствие</th>
+                        <th>Снижение</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var risk in result.Risks)
+                    {
+                        <tr>
+                            <td class="mono">@risk.Code</td>
+                            <td>@risk.Category</td>
+                            <td><span class="@(risk.Level is "высокий" or "критический" ? "badge bad" : "badge")">@risk.Level</span></td>
+                            <td>@risk.Consequence</td>
+                            <td>@risk.Mitigation</td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+
+            @if (result.Explanation is not null && result.Explanation.Trace.Count > 0)
+            {
+                <h3>Трассировка вывода</h3>
+                <ul class="list mono">
+                    @foreach (var entry in result.Explanation.Trace)
+                    {
+                        <li>@entry.Step. @entry.Rule: @entry.Fact → @entry.Conclusion</li>
+                    }
+                </ul>
+            }
+        }
+    </section>
+
+    <section class="card">
+        <h2>Артефакты</h2>
+        @if (artifacts.Count == 0)
+        {
+            <p class="muted">Артефакты ещё не сформированы.</p>
+        }
+        else
+        {
+            <table class="grid">
+                <thead>
+                <tr>
+                    <th>Тип</th>
+                    <th>Файл</th>
+                    <th>Версия</th>
+                    <th>Размер</th>
+                    <th>Создан (UTC)</th>
+                    <th></th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach (var artifact in artifacts)
+                {
+                    <tr>
+                        <td>@DisplayText.ArtifactKind(artifact.Kind)</td>
+                        <td class="mono">@artifact.FileName</td>
+                        <td>v@artifact.Version</td>
+                        <td>@DisplayText.Bytes(artifact.Size)</td>
+                        <td>@DisplayText.Utc(artifact.CreatedAt)</td>
+                        <td class="downloads">
+                            <button class="link" @onclick="() => DownloadAsync(artifact, null)">Скачать</button>
+                            <button class="link" @onclick="() => DownloadAsync(artifact, DocxFormat)">DOCX</button>
+                            <button class="link" @onclick="() => DownloadAsync(artifact, PdfFormat)">PDF</button>
+                            <button class="link" @onclick="() => DownloadAsync(artifact, XlsxFormat)">XLSX</button>
+                        </td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+            <p class="muted">Документы выдаются в DOCX и PDF, расчёт — в XLSX; исходный файл доступен кнопкой «Скачать».</p>
+        }
+    </section>
+
+    <section class="card">
+        <h2>Карточки согласования</h2>
+        @if (decisions.Count == 0)
+        {
+            <p class="muted">Остановок процесса по заданию не было: решение человека не требуется.</p>
+        }
+        else
+        {
+            <table class="grid">
+                <thead>
+                <tr>
+                    <th>Основание</th>
+                    <th>Роль</th>
+                    <th>Срок (UTC)</th>
+                    <th>Решение</th>
+                    <th>Кто</th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach (var decision in decisions)
+                {
+                    <tr>
+                        <td>@DisplayText.Reason(decision.ReasonCode)</td>
+                        <td>@DisplayText.Role(decision.Role)</td>
+                        <td>@DisplayText.Utc(decision.Deadline) <span class="muted">@(decision.Decision == DecisionValue.Pending ? DisplayText.Remaining(decision.Deadline) : "")</span></td>
+                        <td><span class="@(decision.Decision == DecisionValue.Pending ? "badge warn" : decision.Decision == DecisionValue.Approve ? "badge ok" : "badge bad")">@DisplayText.Decision(decision.Decision)</span></td>
+                        <td>@(decision.DecidedBy ?? "—")</td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+            <p><a href="decisions">Перейти к карточкам согласования</a></p>
+        }
+    </section>
+
+    <section class="card">
+        <h2>Журнал аудита</h2>
+        @if (audit.Count == 0)
+        {
+            <p class="muted">Записей нет.</p>
+        }
+        else
+        {
+            <table class="grid">
+                <thead>
+                <tr>
+                    <th>Время (UTC)</th>
+                    <th>Кто</th>
+                    <th>Роль</th>
+                    <th>Действие</th>
+                    <th>Подробности</th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach (var entry in audit)
+                {
+                    <tr>
+                        <td>@DisplayText.Utc(entry.OccurredAt)</td>
+                        <td>@entry.Actor</td>
+                        <td>@DisplayText.Role(entry.Role)</td>
+                        <td class="mono">@entry.Action</td>
+                        <td class="muted">@entry.Details</td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        }
+    </section>
+}
+
+@code {
+    private const string DocxFormat = "docx";
+    private const string PdfFormat = "pdf";
+    private const string XlsxFormat = "xlsx";
+
+    [Parameter]
+    public Guid JobId { get; set; }
+
+    private JobDetailDto? detail;
+    private JobResultDto? result;
+    private List<ArtifactDto> artifacts = new();
+    private List<HumanDecisionDto> decisions = new();
+    private List<AuditEntryDto> audit = new();
+    private string? error;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!Session.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login");
+            return;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        error = null;
+        try
+        {
+            detail = await Gateway.GetJobAsync(JobId);
+            result = await Gateway.GetResultAsync(JobId);
+            artifacts = await Gateway.GetArtifactsAsync(JobId);
+            decisions = await Gateway.GetDecisionsAsync(JobId);
+            audit = await Gateway.GetAuditAsync(JobId);
+        }
+        catch (GatewayException exception)
+        {
+            error = exception.Message;
+        }
+        catch (HttpRequestException)
+        {
+            error = "Шлюз недоступен: проверьте переменную GATEWAY_BASE_URL.";
+        }
+    }
+
+    private async Task DownloadAsync(ArtifactDto artifact, string? format)
+    {
+        error = null;
+        try
+        {
+            var link = await Gateway.GetArtifactLinkAsync(JobId, artifact.ArtifactId, format);
+            Navigation.NavigateTo(link.Url, forceLoad: true);
+        }
+        catch (GatewayException exception)
+        {
+            error = exception.Message;
+        }
+    }
+}

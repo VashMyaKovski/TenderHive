@@ -1,0 +1,42 @@
+@inherits LayoutComponentBase
+@inject SessionState Session
+@inject NavigationManager Navigation
+
+<div class="shell">
+    <header class="topbar">
+        <a class="brand" href="/">TenderHive</a>
+        <nav class="nav">
+            <NavLink href="/" Match="NavLinkMatch.All">Задания</NavLink>
+            <NavLink href="decisions">Согласования</NavLink>
+            <NavLink href="kb">База знаний</NavLink>
+        </nav>
+        <div class="who">
+            @if (Session.IsAuthenticated)
+            {
+                <span class="muted">@Session.DisplayName</span>
+                <span class="badge">@DisplayText.Role(Session.Role ?? string.Empty)</span>
+                <button class="link" @onclick="SignOut">Выйти</button>
+            }
+            else
+            {
+                <a class="badge" href="login">Войти</a>
+            }
+        </div>
+    </header>
+
+    <main class="content">
+        @Body
+    </main>
+
+    <footer class="footer muted">
+        Дашборд не имеет доступа к базе данных: все операции выполняются через API шлюза с проверкой роли и объекта доступа.
+    </footer>
+</div>
+
+@code {
+    private void SignOut()
+    {
+        Session.SignOut();
+        Navigation.NavigateTo("/login");
+    }
+}
