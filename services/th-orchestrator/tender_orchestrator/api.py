@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from contracts.models import Job
 from tender_orchestrator.agent import AgentClient
 from tender_orchestrator.application import Orchestrator
+from tender_orchestrator.artifacts import verify_package
 from tender_orchestrator.config import Settings
 from tender_orchestrator.db import Database, connection_info
 from tender_orchestrator.graph import RiskGraph
@@ -242,6 +243,23 @@ def create_app(settings: Settings, clock: Clock, agent: RiskAgent | None) -> Fas
     async def artifacts(
         job_id: UUID, body: ArtifactReceipt, service: Annotated[Orchestrator, Depends(orchestrator)]
     ) -> JobView:
+        if settings.artifact_token is not None and settings.artifact_max_bytes is not None:
+            try:
+                async with httpx.AsyncClient(
+                    timeout=settings.io_timeout_seconds, trust_env=False, follow_redirects=False
+                ) as http:
+                    verified = await verify_package(
+                        http,
+                        str(settings.agent_url),
+                        settings.artifact_token.get_secret_value(),
+                        job_id,
+                        body,
+                        settings.artifact_max_bytes,
+                    )
+            except httpx.HTTPError:
+                raise HTTPException(503, detail="artifact_store_unavailable") from None
+            if not verified:
+                raise HTTPException(422, detail="artifact_checksum_mismatch")
         return await service.artifacts(job_id, body)
 
     @app.post("/api/v1/jobs/{job_id}/stage-failure", dependencies=[Depends(trusted_service)])
