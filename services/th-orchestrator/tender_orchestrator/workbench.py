@@ -1,6 +1,8 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from hashlib import sha256
+from hmac import compare_digest
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote
@@ -8,7 +10,7 @@ from uuid import UUID, uuid4
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
@@ -87,9 +89,14 @@ def create_app(settings: WorkbenchSettings) -> FastAPI:
     app.mount("/static", StaticFiles(directory=_STATIC, check_dir=False), name="static")
 
     @app.middleware("http")
-    async def prevent_cross_site_reads(
+    async def protect_demo_api(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        token = settings.web_service_token
+        if token is not None and request.url.path.startswith("/api/workbench/"):
+            supplied = request.headers.get("X-Workbench-Token", "")
+            if not compare_digest(supplied.encode(), token.get_secret_value().encode()):
+                return JSONResponse({"detail": "Workbench service authentication required."}, 401)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -179,7 +186,10 @@ def create_app(settings: WorkbenchSettings) -> FastAPI:
     async def artifact(name: str, run: Annotated[Run, Depends(get_run)]) -> Response:
         if run.phase != "done" or name not in run.artifacts:
             raise HTTPException(status_code=404, detail="Файл комплекта пока недоступен.")
-        return _file(run.artifacts[name], name, _ARTIFACT_MIMES[name])
+        body = run.artifacts[name]
+        response = _file(body, name, _ARTIFACT_MIMES[name])
+        response.headers["X-Artifact-SHA256"] = sha256(body).hexdigest()
+        return response
 
     return app
 

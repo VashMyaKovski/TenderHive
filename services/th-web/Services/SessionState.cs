@@ -1,38 +1,66 @@
+using Microsoft.AspNetCore.Components.Server.ProtectedBrowserStorage;
+using Microsoft.JSInterop;
 using TenderHive.Contracts;
 
 namespace TenderHive.Web.Services;
 
-/// <summary>Состояние входа пользователя в пределах схемы Blazor Server.</summary>
-public sealed class SessionState
+public sealed class SessionState(ProtectedSessionStorage storage)
 {
-    public string? Token { get; private set; }
+    private const string SessionKey = "tenderhive-login";
+    private LoginResponse? _current;
 
-    public string? Username { get; private set; }
+    public string? Token => _current?.Token;
+    public string? Username => _current?.Username;
+    public string? DisplayName => _current?.DisplayName;
+    public string? Role => _current?.Role;
+    public bool IsAuthenticated => _current is { ExpiresAt: var expiry } && expiry > DateTimeOffset.UtcNow;
 
-    public string? DisplayName { get; private set; }
-
-    public string? Role { get; private set; }
-
-    public DateTimeOffset? ExpiresAt { get; private set; }
-
-    public bool IsAuthenticated => Token is not null && ExpiresAt > DateTimeOffset.UtcNow;
-
-    public void SignIn(LoginResponse response)
+    public async Task RestoreAsync()
     {
-        Token = response.Token;
-        Username = response.Username;
-        DisplayName = response.DisplayName;
-        Role = response.Role;
-        ExpiresAt = response.ExpiresAt;
+        try
+        {
+            var saved = await storage.GetAsync<LoginResponse>(SessionKey);
+            _current = saved.Success ? saved.Value : null;
+            if (!IsAuthenticated && _current is not null)
+            {
+                await SignOutAsync();
+            }
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            await SignOutAsync();
+        }
+        catch (JSException)
+        {
+            // Authentication can still be established for this circuit if session storage is unavailable.
+            _current = null;
+        }
     }
 
-    public void SignOut()
+    public async Task SignInAsync(LoginResponse response)
     {
-        Token = null;
-        Username = null;
-        DisplayName = null;
-        Role = null;
-        ExpiresAt = null;
+        _current = response;
+        try
+        {
+            await storage.SetAsync(SessionKey, response);
+        }
+        catch (JSException)
+        {
+            // Leave the current circuit signed in when session storage is unavailable.
+        }
+    }
+
+    public async Task SignOutAsync()
+    {
+        _current = null;
+        try
+        {
+            await storage.DeleteAsync(SessionKey);
+        }
+        catch (JSException)
+        {
+            // The current circuit is already signed out.
+        }
     }
 
     public bool IsInRole(string role) => string.Equals(Role, role, StringComparison.Ordinal);

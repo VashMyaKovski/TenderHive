@@ -7,7 +7,7 @@ from typing import Annotated
 from uuid import UUID, uuid4, uuid5
 
 import httpx
-from pydantic import Field, HttpUrl, JsonValue
+from pydantic import Field, HttpUrl, JsonValue, SecretStr
 
 from contracts.agent_task import AgentResult, ModelCall
 from contracts.models import Artifact, Estimate, Job, Recommendation, SolverResult, StopReason
@@ -57,6 +57,7 @@ class WorkbenchSettings(DemoSettings):
     web_margin_threshold_percent: Percent
     web_penalty_threshold_percent: Percent
     web_profile_ref: str
+    web_service_token: Annotated[SecretStr, Field(min_length=32)] | None = None
 
 
 @dataclass(slots=True)

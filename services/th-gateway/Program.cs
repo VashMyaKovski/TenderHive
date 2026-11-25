@@ -17,9 +17,23 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddEnvironmentVariables();
 
 var options = GatewayOptions.FromConfiguration(builder.Configuration);
+var workbench = DemoWorkbenchOptions.FromConfiguration(builder.Configuration);
 
 builder.Services.AddSingleton(options);
 builder.Services.AddHttpClient();
+if (workbench is not null)
+{
+    builder.Services.AddHttpClient(DemoWorkbenchClient.ClientName, client =>
+    {
+        client.BaseAddress = workbench.Origin;
+        client.DefaultRequestHeaders.Add("X-Workbench-Token", workbench.Token);
+        client.MaxResponseContentBufferSize = DemoWorkbenchClient.MaxResponseBytes;
+    }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+    builder.Services.AddSingleton(new DemoRunRegistry(workbench.GrantsFile));
+    builder.Services.AddScoped(services => new DemoWorkbenchClient(
+        services.GetRequiredService<IHttpClientFactory>().CreateClient(DemoWorkbenchClient.ClientName)));
+    builder.Services.AddScoped<DemoRuns>();
+}
 builder.Services.ConfigureHttpJsonOptions(http =>
 {
     http.SerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower;
@@ -105,6 +119,10 @@ app.MapJobEndpoints();
 app.MapDecisionEndpoints();
 app.MapKbEndpoints();
 app.MapHealthEndpoints();
+if (workbench is not null)
+{
+    app.MapDemoRunEndpoints();
+}
 
 var store = app.Services.GetRequiredService<IJobStore>();
 await store.InitializeAsync(CancellationToken.None);

@@ -1,4 +1,6 @@
 @page "/"
+@page "/jobs"
+@inject IConfiguration Configuration
 @inject GatewayClient Gateway
 @inject SessionState Session
 @inject NavigationManager Navigation
@@ -59,6 +61,12 @@ else
 
     protected override async Task OnInitializedAsync()
     {
+        if (Configuration.GetValue<bool>("DEMO_DASHBOARD_ENABLED"))
+        {
+            Navigation.NavigateTo("/demo", replace: true);
+            return;
+        }
+
         if (!Session.IsAuthenticated)
         {
             Navigation.NavigateTo("/login");

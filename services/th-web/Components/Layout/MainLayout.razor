@@ -1,42 +1,70 @@
 @inherits LayoutComponentBase
 @inject SessionState Session
 @inject NavigationManager Navigation
+@inject IConfiguration Configuration
 
 <div class="shell">
+    <a class="skip-link" href="#content">К содержимому</a>
     <header class="topbar">
         <a class="brand" href="/">TenderHive</a>
-        <nav class="nav">
-            <NavLink href="/" Match="NavLinkMatch.All">Задания</NavLink>
-            <NavLink href="decisions">Согласования</NavLink>
-            <NavLink href="kb">База знаний</NavLink>
+        <nav class="nav" aria-label="Основная навигация">
+            @if (DashboardEnabled)
+            {
+                <NavLink href="demo">Анализ закупок</NavLink>
+            }
+            else
+            {
+                <NavLink href="/" Match="NavLinkMatch.All">Задания</NavLink>
+                <NavLink href="decisions">Согласования</NavLink>
+                <NavLink href="kb">База знаний</NavLink>
+            }
         </nav>
         <div class="who">
             @if (Session.IsAuthenticated)
             {
                 <span class="muted">@Session.DisplayName</span>
                 <span class="badge">@DisplayText.Role(Session.Role ?? string.Empty)</span>
-                <button class="link" @onclick="SignOut">Выйти</button>
+                <button class="link" type="button" @onclick="SignOutAsync">Выйти</button>
             }
-            else
+            else if (ready && !OnLoginPage)
             {
-                <a class="badge" href="login">Войти</a>
+                <a class="badge" href="@LoginRoute">Войти</a>
             }
         </div>
     </header>
 
-    <main class="content">
-        @Body
+    <main id="content" class="content" tabindex="-1">
+        @if (ready)
+        {
+            @Body
+        }
+        else
+        {
+            <p class="muted" role="status">Загрузка дашборда…</p>
+        }
     </main>
-
-    <footer class="footer muted">
-        Дашборд не имеет доступа к базе данных: все операции выполняются через API шлюза с проверкой роли и объекта доступа.
-    </footer>
 </div>
 
 @code {
-    private void SignOut()
+    private bool ready;
+    private bool DashboardEnabled => Configuration.GetValue<bool>("DEMO_DASHBOARD_ENABLED");
+    private bool OnLoginPage => new Uri(Navigation.Uri).AbsolutePath.Equals("/login", StringComparison.OrdinalIgnoreCase);
+    private string LoginRoute => "/login?returnUrl=" + Uri.EscapeDataString(new Uri(Navigation.Uri).PathAndQuery);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        Session.SignOut();
-        Navigation.NavigateTo("/login");
+        if (firstRender)
+        {
+            await Session.RestoreAsync();
+            ready = true;
+            StateHasChanged();
+        }
+    }
+
+    private async Task SignOutAsync()
+    {
+        var returnTo = LoginRoute;
+        await Session.SignOutAsync();
+        Navigation.NavigateTo(returnTo);
     }
 }

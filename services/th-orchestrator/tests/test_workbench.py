@@ -3,7 +3,7 @@ from hashlib import sha256
 from uuid import UUID, uuid4, uuid5
 
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from pytest import MonkeyPatch, raises
 
 from tender_orchestrator import workbench
@@ -120,3 +120,14 @@ def test_local_api_keeps_documents_and_blocks_cross_site_writes(monkeypatch: Mon
             ).status_code
             == 409
         )
+
+
+def test_internal_mode_requires_workbench_token() -> None:
+    token = "workbench-test-token-" * 3
+    settings = _settings().model_copy(update={"web_service_token": SecretStr(token)})
+    with TestClient(workbench.create_app(settings), base_url="http://th-workbench:8000") as client:
+        path = f"/api/workbench/runs/{uuid4()}"
+        assert client.get("/healthz").status_code == 200
+        assert client.get(path).status_code == 401
+        assert client.get(path, headers={"X-Workbench-Token": "incorrect"}).status_code == 401
+        assert client.get(path, headers={"X-Workbench-Token": token}).status_code == 404

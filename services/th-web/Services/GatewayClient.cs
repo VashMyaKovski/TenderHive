@@ -93,6 +93,34 @@ public sealed class GatewayClient
     public Task ActivateKbVersionAsync(string version, string? comment) =>
         SendAsync<object>(HttpMethod.Post, $"api/kb/versions/{Uri.EscapeDataString(version)}/activate", new KbActivateRequest(comment));
 
+    public Task<List<DemoRunDto>> ListDemoRunsAsync(CancellationToken ct) =>
+        SendAsync<List<DemoRunDto>>(HttpMethod.Get, "api/demo/runs", null, ct);
+
+    public Task<DemoRunDto> StartDemoRunAsync(DemoRunInput input, CancellationToken ct) =>
+        SendAsync<DemoRunDto>(HttpMethod.Post, "api/demo/runs", input, ct);
+
+    public Task<DemoRunDto> GetDemoRunAsync(Guid id, CancellationToken ct) =>
+        SendAsync<DemoRunDto>(HttpMethod.Get, $"api/demo/runs/{id}", null, ct);
+
+    public Task<DemoRunDto> DecideDemoRunAsync(Guid id, DemoDecisionInput input, CancellationToken ct) =>
+        SendAsync<DemoRunDto>(HttpMethod.Post, $"api/demo/runs/{id}/decision", input, ct);
+
+    public async Task<(byte[] Bytes, string ContentType)> DownloadDemoArtifactAsync(
+        Guid id, string name, CancellationToken ct)
+    {
+        using var request = Build(HttpMethod.Get, $"api/demo/runs/{id}/artifacts/{Uri.EscapeDataString(name)}", null);
+        using var response = await _http.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await CreateExceptionAsync(response, ct);
+        }
+
+        return (
+            await response.Content.ReadAsByteArrayAsync(ct),
+            response.Content.Headers.ContentType?.MediaType ?? "application/octet-stream");
+    }
+
+
     private async Task<T> SendAsync<T>(HttpMethod method, string path, object? body, CancellationToken ct = default)
     {
         using var request = Build(method, path, body);
