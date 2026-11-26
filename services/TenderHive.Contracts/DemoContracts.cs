@@ -14,14 +14,28 @@ public sealed record DemoFacts(
     DateOnly? DeliveryDeadline = null);
 
 public sealed record DemoRunInput(
-    string Title, IReadOnlyList<DemoAttachment> Documents, DemoFacts Facts, string Context);
+    string Title, IReadOnlyList<DemoAttachment> Documents, DemoFacts? Facts = null, string? Context = null);
+
+public sealed record DemoRequirementSourceDto(Guid FileId, int Page, Guid BlockId, IReadOnlyList<double> Bbox);
+
+public sealed record DemoExtractedRequirementDto(
+    Guid RequirementId, string Text, string Kind, bool Mandatory, JsonElement? Value,
+    string? Unit, DemoRequirementSourceDto Source, double Confidence, bool NeedsReview);
+
+public sealed record DemoExtractionDto(
+    string Status, IReadOnlyList<DemoExtractedRequirementDto> Requirements, IReadOnlyList<string> Warnings);
+
+public sealed record DemoRequirementCorrection(Guid RequirementId, string Text, JsonElement? Value);
+
+public sealed record DemoExtractionConfirmation(
+    DemoFacts Facts, string Context, IReadOnlyList<DemoRequirementCorrection> Requirements);
 
 public sealed record DemoSupplyConfirmation(decimal Quantity, DateOnly DeliveryDate, decimal AdditionalCost);
 
 public sealed record DemoDecisionInput(
     Guid CardId, string Decision, string? Comment = null, DemoSupplyConfirmation? SupplyConfirmation = null);
 
-public sealed record DemoDocumentDto(string Name, long Size);
+public sealed record DemoDocumentDto(string Name, long Size, Guid? FileId = null);
 
 public sealed record DemoMessageDto(
     Guid Id, string Agent, string To, string Status, string Text, DateTimeOffset At, JsonElement? Details);
@@ -52,4 +66,9 @@ public sealed record DemoRunDto(
     DemoCardDto? Card,
     IReadOnlyList<DemoArtifactDto> Artifacts,
     string? Error,
-    IReadOnlyList<DemoRiskDecisionDto>? RiskDecisions = null);
+    IReadOnlyList<DemoRiskDecisionDto>? RiskDecisions = null,
+    DemoExtractionDto? Extraction = null,
+    DemoFacts? Facts = null,
+    string? Context = null,
+    bool CanReviewExtraction = false,
+    bool IsRunning = false);

@@ -47,10 +47,23 @@ services:
     healthcheck:
       timeout: 15s
 
+  th-docintel:
+    ports: !reset []
+    healthcheck:
+      timeout: 15s
+
   th-workbench:
     ports: !reset []
     environment:
       DEMO_WEB_SERVICE_TOKEN: ${DASH_WORKBENCH_TOKEN:?Run Start-TenderHive.ps1}
+      DEMO_WEB_DOCINTEL_URL: http://th-docintel:8000
+      DEMO_WEB_DATABASE_DSN: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
+      DEMO_WEB_STORAGE_DIR: /var/lib/tenderhive/workbench
+    volumes:
+      - workbench_storage:/var/lib/tenderhive/workbench
+    depends_on:
+      th-docintel:
+        condition: service_healthy
 
   th-gateway:
     profiles: [dashboard]
@@ -91,3 +104,4 @@ services:
 
 volumes:
   dashboard_access_grants:
+  workbench_storage:

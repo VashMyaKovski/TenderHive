@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from hashlib import sha256
@@ -11,21 +12,30 @@ from uuid import UUID, uuid4
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
+from psycopg import Error as PostgresError
 from pydantic import BaseModel, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.staticfiles import StaticFiles
 
+from contracts.models import Contract
+from tender_orchestrator.db import Database
+from tender_orchestrator.models import ReviewCard
+from tender_orchestrator.workbench_extraction import confirm
 from tender_orchestrator.workbench_flow import Run, WorkbenchSettings, new_run, work_run
 from tender_orchestrator.workbench_inputs import (
     MAX_BODY_BYTES,
     DecisionInput,
+    ExtractionConfirmation,
     RunInput,
+    confirmed_normalization_record,
     load_uploads,
     normalization_record,
 )
+from tender_orchestrator.workbench_store import WorkbenchStore
 
 _STATIC = Path(__file__).with_name("web_static")
-_FINISHED = {"done", "declined", "failed", "needs_clarification"}
+_FINISHED = {"done", "declined", "failed", "needs_clarification", "extraction_failed"}
+_LOG = logging.getLogger("uvicorn.error.workbench")
 _ARTIFACT_MIMES = {
     "offer.docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "offer.pdf": "application/pdf",
@@ -70,16 +80,71 @@ def _file(body: bytes, name: str, content_type: str) -> Response:
     )
 
 
+class RetryExtraction(Contract):
+    pass
+
+
 def create_app(settings: WorkbenchSettings) -> FastAPI:
     runs: dict[UUID, Run] = {}
+    load_lock = asyncio.Lock()
+    dsn, storage = settings.web_database_dsn, settings.web_storage_dir
+    if (dsn is None) != (storage is None):
+        raise ValueError("Configure both Workbench PostgreSQL and storage settings.")
+    store = (
+        WorkbenchStore(Database(dsn.get_secret_value(), settings.web_max_runs), storage)
+        if dsn is not None and storage is not None
+        else None
+    )
+
+    async def perform(run: Run, decision: tuple[ReviewCard, DecisionInput] | None) -> None:
+        await work_run(settings, run, decision)
+        run.pending = False
+        run.pending_decision = None
+        try:
+            await run.checkpoint()
+        except (OSError, PostgresError) as error:
+            _LOG.warning("could not save run_id=%s (%s)", run.id, type(error).__name__)
+            run.error = "Не удалось сохранить состояние прогона."
+
+    def restore_decision(run: Run) -> tuple[ReviewCard, DecisionInput] | None:
+        body = run.pending_decision
+        if body is not None and run.view is not None:
+            card = next((item for item in run.view.cards if item.card_id == body.card_id), None)
+            if card is not None:
+                return card, body
+        return None
+
+    async def launch(run: Run, decision: tuple[ReviewCard, DecisionInput] | None = None) -> None:
+        run.pending = True
+        run.pending_decision = (
+            decision[1].model_copy(update={"card_id": decision[0].card_id})
+            if decision is not None
+            else None
+        )
+        try:
+            await run.checkpoint()
+        except (OSError, PostgresError) as error:
+            run.pending = False
+            run.pending_decision = None
+            raise HTTPException(503, detail="Не удалось сохранить изменения прогона.") from error
+        run.task = asyncio.create_task(perform(run, decision))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        tasks = [run.task for run in runs.values() if run.task is not None and run.is_running]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if store is not None:
+            await store.ready()
+            for run_id in await store.pending_ids():
+                run = await store.get(run_id)
+                if run is not None:
+                    runs[run_id] = run
+                    run.task = asyncio.create_task(perform(run, restore_decision(run)))
+        try:
+            yield
+        finally:
+            tasks = [run.task for run in runs.values() if run.task is not None and run.is_running]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     allowed_hosts = ["localhost", "127.0.0.1"]
@@ -104,10 +169,19 @@ def create_app(settings: WorkbenchSettings) -> FastAPI:
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'; object-src 'none'"
         return response
 
-    def get_run(run_id: UUID) -> Run:
-        if run_id not in runs:
-            raise HTTPException(status_code=404, detail="Прогон не найден.")
-        return runs[run_id]
+    async def get_run(run_id: UUID) -> Run:
+        async with load_lock:
+            if run_id in runs:
+                return runs[run_id]
+            if store is not None:
+                try:
+                    run = await store.get(run_id)
+                except (OSError, PostgresError) as error:
+                    raise HTTPException(503, detail="Хранилище прогонов недоступно.") from error
+                if run is not None:
+                    runs[run_id] = run
+                    return run
+        raise HTTPException(status_code=404, detail="Прогон не найден.")
 
     @app.get("/")
     async def index() -> FileResponse:
@@ -120,6 +194,8 @@ def create_app(settings: WorkbenchSettings) -> FastAPI:
     @app.post("/api/workbench/runs", dependencies=[Depends(_local_write)], status_code=202)
     async def start(request: Request) -> dict[str, object]:
         incoming = await _body(request, RunInput, MAX_BODY_BYTES)
+        if settings.web_docintel_url is None and incoming.facts is None:
+            raise HTTPException(422, detail="Заполните сведения для ручного прогона.")
         run_id = uuid4()
         try:
             uploads = load_uploads(run_id, incoming, str(settings.web_url))
@@ -140,12 +216,70 @@ def create_app(settings: WorkbenchSettings) -> FastAPI:
         run = new_run(
             run_id, incoming, uploads, normalization_record(run_id, incoming, str(settings.web_url))
         )
+        if store is not None:
+            run.save = store.save
         runs[run_id] = run
-        run.task = asyncio.create_task(work_run(settings, run, None))
+        try:
+            await launch(run)
+        except HTTPException:
+            del runs[run_id]
+            raise
         return run.snapshot()
 
     @app.get("/api/workbench/runs/{run_id}")
     async def status(run: Annotated[Run, Depends(get_run)]) -> dict[str, object]:
+        return run.snapshot()
+
+    @app.post(
+        "/api/workbench/runs/{run_id}/extraction/confirm",
+        dependencies=[Depends(_local_write)],
+        status_code=202,
+    )
+    async def confirm_extraction(
+        request: Request, run: Annotated[Run, Depends(get_run)]
+    ) -> dict[str, object]:
+        body = await _body(request, ExtractionConfirmation, 4 * 1024**2)
+        earlier = run.extraction_review
+        if run.is_running or run.phase != "awaiting_extraction_confirmation" or earlier is None:
+            raise HTTPException(409, detail="Разбор уже подтверждён или ещё выполняется.")
+        try:
+            reviewed = confirm(earlier, body)
+        except ValueError as error:
+            raise HTTPException(422, detail=str(error)) from None
+        normalization = confirmed_normalization_record(
+            run.id, run.title, body.facts, body.context, str(settings.web_url)
+        )
+        previous = run.facts, run.context, run.normalization
+        run.facts, run.context, run.normalization = body.facts, body.context, normalization
+        run.extraction_review = reviewed
+        run.extraction_confirmed = True
+        try:
+            await launch(run)
+        except HTTPException:
+            run.facts, run.context, run.normalization = previous
+            run.extraction_review = earlier
+            run.extraction_confirmed = False
+            raise
+        return run.snapshot()
+
+    @app.post(
+        "/api/workbench/runs/{run_id}/extraction/retry",
+        dependencies=[Depends(_local_write)],
+        status_code=202,
+    )
+    async def retry_extraction(
+        request: Request, run: Annotated[Run, Depends(get_run)]
+    ) -> dict[str, object]:
+        await _body(request, RetryExtraction, 256)
+        if run.is_running or run.phase != "extraction_failed":
+            raise HTTPException(409, detail="Повторный разбор для этого прогона недоступен.")
+        earlier = run.extraction_review
+        run.extraction_review = None
+        try:
+            await launch(run)
+        except HTTPException:
+            run.extraction_review = earlier
+            raise
         return run.snapshot()
 
     @app.post(
@@ -168,7 +302,11 @@ def create_app(settings: WorkbenchSettings) -> FastAPI:
         if run.requires_comment(card) and not body.comment:
             raise HTTPException(status_code=422, detail="Укажите обоснование согласования.")
         if card.reason_code == "RESOURCE_GAP" and body.decision == "APPROVED":
-            if run.facts.delivery_deadline is None or body.supply_confirmation is None:
+            if (
+                run.facts is None
+                or run.facts.delivery_deadline is None
+                or body.supply_confirmation is None
+            ):
                 raise HTTPException(
                     status_code=422,
                     detail="Укажите срок, объём, дату и дополнительные затраты на поставку.",
@@ -177,7 +315,7 @@ def create_app(settings: WorkbenchSettings) -> FastAPI:
             raise HTTPException(
                 status_code=422, detail="Подтверждение поставки относится к карточке дефицита."
             )
-        run.task = asyncio.create_task(work_run(settings, run, (card, body)))
+        await launch(run, (card, body))
         return run.snapshot()
 
     @app.get("/api/workbench/runs/{run_id}/documents/{file_id}")

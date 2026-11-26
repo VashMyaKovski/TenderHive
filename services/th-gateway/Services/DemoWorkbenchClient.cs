@@ -38,6 +38,18 @@ public sealed class DemoWorkbenchClient(HttpClient http)
         return await ReadRunAsync(response, ct, id);
     }
 
+    public async Task<DemoRunDto> ConfirmExtractionAsync(Guid id, DemoExtractionConfirmation input, CancellationToken ct)
+    {
+        using var response = await SendAsync(HttpMethod.Post, $"api/workbench/runs/{id:D}/extraction/confirm", input, ct);
+        return await ReadRunAsync(response, ct, id);
+    }
+
+    public async Task<DemoRunDto> RetryExtractionAsync(Guid id, CancellationToken ct)
+    {
+        using var response = await SendAsync(HttpMethod.Post, $"api/workbench/runs/{id:D}/extraction/retry", new { }, ct);
+        return await ReadRunAsync(response, ct, id);
+    }
+
     public async Task<DemoDownload> DownloadAsync(Guid id, string name, CancellationToken ct)
     {
         var contentType = ArtifactContentType(name) ?? throw new ApiException(404, "Файл комплекта не найден.");
@@ -103,7 +115,7 @@ public sealed class DemoWorkbenchClient(HttpClient http)
             throw response.StatusCode switch
             {
                 HttpStatusCode.NotFound => new ApiException(404, "Данные прогона не найдены."),
-                HttpStatusCode.Conflict => new ApiException(409, "Карточка уже изменилась или закрыта."),
+                HttpStatusCode.Conflict => new ApiException(409, "Этап уже изменился или выполняется."),
                 HttpStatusCode.RequestEntityTooLarge => new ApiException(413, "Размер запроса превышает лимит."),
                 HttpStatusCode.UnprocessableEntity => new ApiException(422, "Проверьте параметры лота и содержимое документов."),
                 HttpStatusCode.TooManyRequests => new ApiException(429, "Дождитесь завершения другого прогона."),

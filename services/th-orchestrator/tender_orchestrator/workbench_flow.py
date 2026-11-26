@@ -1,8 +1,10 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4, uuid5
 
@@ -22,6 +24,11 @@ from tender_orchestrator.demo_flow import (
     agent,
 )
 from tender_orchestrator.models import JobView, ReviewCard, SupplyConfirmation
+from tender_orchestrator.workbench_extraction import (
+    ExtractionReview,
+    confirmed_daily_penalty,
+    extract,
+)
 from tender_orchestrator.workbench_inputs import (
     DEMO_MINIMUM_VALIDITY_WORKDAYS,
     DecisionInput,
@@ -58,14 +65,17 @@ class WorkbenchSettings(DemoSettings):
     web_penalty_threshold_percent: Percent
     web_profile_ref: str
     web_service_token: Annotated[SecretStr, Field(min_length=32)] | None = None
+    web_docintel_url: HttpUrl | None = None
+    web_database_dsn: SecretStr | None = None
+    web_storage_dir: Path | None = None
 
 
 @dataclass(slots=True)
 class Run:
     id: UUID
     title: str
-    facts: Facts
-    context: str
+    facts: Facts | None
+    context: str | None
     uploads: list[Upload]
     normalization: Upload
     view: JobView | None = None
@@ -74,6 +84,16 @@ class Run:
     error: str | None = None
     messages: list[dict[str, JsonValue]] = field(default_factory=list)
     artifacts: dict[str, bytes] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    extraction_review: ExtractionReview | None = None
+    extraction_confirmed: bool = False
+    pending: bool = False
+    pending_decision: DecisionInput | None = None
+    save: Callable[[Run], Awaitable[None]] | None = None
+
+    async def checkpoint(self) -> None:
+        if self.save is not None:
+            await self.save(self)
 
     @property
     def card(self) -> ReviewCard | None:
@@ -83,12 +103,16 @@ class Run:
 
     @property
     def is_running(self) -> bool:
-        return self.task is not None and not self.task.done()
+        return self.pending or (self.task is not None and not self.task.done())
 
     @property
     def phase(self) -> str:
         if self.error is not None:
             return "failed"
+        if self.extraction_review is not None and not self.extraction_confirmed:
+            if self.extraction_review.status in {"FAILED", "REJECTED"}:
+                return "extraction_failed"
+            return "awaiting_extraction_confirmation"
         return self.view.phase if self.view is not None else "queued"
 
     @staticmethod
@@ -99,7 +123,7 @@ class Run:
         return self.is_risk_review(card) or card.reason_code == "LOW_MARGIN"
 
     def supply_requirement(self, card: ReviewCard) -> dict[str, object] | None:
-        if card.reason_code != "RESOURCE_GAP":
+        if card.reason_code != "RESOURCE_GAP" or self.facts is None:
             return None
         return {
             "shortage": decimal_text(
@@ -139,13 +163,26 @@ class Run:
             "title": self.title,
             "status": "ERROR" if self.error else (view.job.status if view else "ACCEPTED"),
             "phase": self.phase,
-            "trace_id": str(view.job.trace_id) if view and view.job.trace_id else None,
+            "trace_id": str(view.job.trace_id)
+            if view and view.job.trace_id
+            else str(uuid5(self.id, "trace")),
             "documents": [
-                {"name": upload.document.name, "size": len(upload.data)} for upload in self.uploads
+                {
+                    "file_id": str(upload.document.file_id),
+                    "name": upload.document.name,
+                    "size": len(upload.data),
+                }
+                for upload in self.uploads
             ],
+            "extraction": self.extraction_review.model_dump(mode="json")
+            if self.extraction_review is not None
+            else None,
+            "facts": self.facts.model_dump(mode="json") if self.facts is not None else None,
+            "context": self.context,
+            "is_running": self.is_running,
             "messages": self.messages,
             "recommendation": _recommendation(result, self.facts, confirmation)
-            if result is not None
+            if result is not None and self.facts is not None
             else None,
             "card": (
                 {
@@ -249,6 +286,20 @@ def _source(run: Run) -> dict[str, str]:
     }
 
 
+def _risk_source(run: Run, context: str) -> dict[str, str]:
+    if run.extraction_review is not None:
+        for item in run.extraction_review.requirements:
+            if context == item.text:
+                source = item.source
+                for upload in run.uploads:
+                    if upload.document.file_id == source.file_id:
+                        return {
+                            "url": upload.document.storage_path,
+                            "locator": f"{upload.document.name}, страница {source.page}",
+                        }
+    return _source(run)
+
+
 def _requirement(run: Run) -> dict[str, JsonValue]:
     return {
         "requirement_id": str(uuid5(run.id, "validity")),
@@ -322,6 +373,7 @@ async def _solve(
     http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run, view: JobView
 ) -> JobView:
     facts = run.facts
+    assert facts is not None and run.context is not None
     confirmation = _supply_confirmation(view)
     deadline = facts.delivery_deadline
     effective_available = facts.available_quantity
@@ -347,7 +399,13 @@ async def _solve(
             {
                 "regime": "commercial",
                 "regime_source": source,
-                "clauses": [{"text": run.context, "source": source, "requires_review": False}],
+                "clauses": [
+                    {
+                        "text": run.context,
+                        "source": _risk_source(run, run.context),
+                        "requires_review": False,
+                    }
+                ],
             },
         ),
         _ask(http, settings, run, view, "resource", {"positions": [position]}),
@@ -480,6 +538,8 @@ async def _generate(
         )
         _verify_content(artifact, reply.content)
         artifacts[f"offer.{artifact.kind.lower()}"] = reply.content
+    run.artifacts.update(artifacts)
+    await run.checkpoint()
     view = await _post_job(
         http,
         settings,
@@ -487,8 +547,6 @@ async def _generate(
         "artifacts",
         {"execution_id": str(view.execution_id), "artifacts": raw},
     )
-    if view.phase == "done":
-        run.artifacts.update(artifacts)
     return view
 
 
@@ -528,19 +586,31 @@ async def _advance(http: httpx.AsyncClient, settings: WorkbenchSettings, run: Ru
 
 
 async def _start(http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run) -> None:
-    readable = await asyncio.to_thread(lambda: sum(has_readable_text(file) for file in run.uploads))
-    run.message(
-        "workbench",
-        "orchestrator",
-        "DONE",
-        f"Файлов принято: {len(run.uploads)}. С доступным текстом: {readable}.",
-        None,
-    )
+    if settings.web_docintel_url is not None and not run.extraction_confirmed:
+        run.message("workbench", "docintel", "SENT", "Разбор документов", None)
+        run.extraction_review = await extract(
+            http, settings.web_docintel_url, run.id, uuid5(run.id, "trace"), run.uploads
+        )
+        run.message(
+            "docintel", "workbench", run.extraction_review.status, "Разбор документов", None
+        )
+        return
+    assert run.facts is not None and run.context is not None
+    if run.view is None:
+        readable = (
+            await asyncio.to_thread(lambda: sum(has_readable_text(file) for file in run.uploads))
+            if settings.web_docintel_url is None
+            else 0
+        )
+        summary = f"Файлов принято: {len(run.uploads)}."
+        if settings.web_docintel_url is None:
+            summary += f" С доступным текстом: {readable}."
+        run.message("workbench", "orchestrator", "DONE", summary, None)
     job = Job(
         job_id=run.id,
         idempotency_key=str(run.id),
         source="web",
-        created_at=datetime.now(UTC),
+        created_at=run.created_at,
         status="ACCEPTED",
         kb_version=settings.kb_version,
         lot_ids=["uploaded-lot"],
@@ -548,22 +618,37 @@ async def _start(http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run)
         profile_ref=settings.web_profile_ref,
         trace_id=uuid5(run.id, "trace"),
     )
-    response = _ok(
-        await http.post(
-            _url(settings.orchestrator_url, "/api/v1/jobs"),
-            headers=_auth(settings.service_token),
-            json=job.model_dump(mode="json"),
+    if run.view is None:
+        response = _ok(
+            await http.post(
+                _url(settings.orchestrator_url, "/api/v1/jobs"),
+                headers=_auth(settings.service_token),
+                json=job.model_dump(mode="json"),
+            )
         )
-    )
-    view = JobView.model_validate_json(response.content)
-    run.view = view
-    run.extraction = await _ask(
-        http, settings, run, view, "extraction", {"requirements": [_requirement(run)]}
-    )
+        run.view = JobView.model_validate_json(response.content)
+        await run.checkpoint()
+    view = run.view
+    if view.stage != "extract" or view.phase != "accepted":
+        await _advance(http, settings, run)
+        return
+    if run.extraction is None:
+        requirements = (
+            [item.model_dump(mode="json") for item in run.extraction_review.requirements]
+            if run.extraction_review is not None
+            else [_requirement(run)]
+        )
+        run.extraction = await _ask(
+            http, settings, run, view, "extraction", {"requirements": requirements}
+        )
+        await run.checkpoint()
     if run.facts.offer_price < run.facts.quantity * run.facts.unit_cost:
         run.view = await _solve(http, settings, run, view)
         return
     run.message("orchestrator", "risk", "SENT", "Оценка открытого фрагмента", None)
+    penalty = run.facts.penalty_daily_percent
+    if penalty is None:
+        penalty = confirmed_daily_penalty(run.extraction_review, run.context)
     run.view = await _post_job(
         http,
         settings,
@@ -576,13 +661,11 @@ async def _start(http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run)
                 "task_id": str(uuid5(run.id, "risk")),
                 "job_id": str(run.id),
                 "fragment_id": str(uuid5(run.id, "contract")),
-                "source": _source(run),
+                "source": _risk_source(run, run.context),
                 "fragment_text": run.context,
                 "fragment_type": "public_text",
                 "rules_version": settings.kb_version,
-                "penalty_daily_percent": decimal_text(
-                    run.facts.penalty_daily_percent or Decimal(0)
-                ),
+                "penalty_daily_percent": decimal_text(penalty or Decimal(0)),
                 "penalty_daily_threshold_percent": decimal_text(
                     settings.web_penalty_threshold_percent
                 ),
@@ -601,6 +684,14 @@ async def work_run(
         async with httpx.AsyncClient(
             timeout=settings.timeout_seconds, trust_env=False, follow_redirects=False
         ) as http:
+            if run.save is not None and run.view is not None:
+                reply = _ok(
+                    await http.get(
+                        _url(settings.orchestrator_url, f"/api/v1/jobs/{run.id}"),
+                        headers=_auth(settings.service_token),
+                    )
+                )
+                run.view = JobView.model_validate_json(reply.content)
             if decision is None:
                 await _start(http, settings, run)
                 return

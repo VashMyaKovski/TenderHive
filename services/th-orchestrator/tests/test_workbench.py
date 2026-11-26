@@ -92,7 +92,7 @@ def test_upload_rejects_unknown_content_and_absent_risk_context() -> None:
         load_uploads(uuid4(), inputs, "http://th-workbench:8000")
     missing = _incoming("tender.txt", b"Some text")
     del missing["context"]
-    with raises(ValidationError, match="context"):
+    with raises(ValidationError, match="вместе"):
         RunInput.model_validate(missing)
 
 
@@ -120,10 +120,12 @@ def test_local_api_keeps_documents_and_blocks_cross_site_writes(monkeypatch: Mon
         )
         assert created.status_code == 202
         run_id = created.json()["id"]
-        assert created.json()["documents"] == [{"name": "source.txt", "size": len(data)}]
+        file_id = uuid5(UUID(run_id), "attachment:0")
+        assert created.json()["documents"] == [
+            {"file_id": str(file_id), "name": "source.txt", "size": len(data)}
+        ]
         assert created.headers["cache-control"] == "no-store"
         assert "service-token" not in created.text
-        file_id = uuid5(UUID(run_id), "attachment:0")
         download = client.get(f"/api/workbench/runs/{run_id}/documents/{file_id}")
         assert download.content == data
         assert download.headers["content-disposition"].startswith("attachment;")
@@ -149,6 +151,7 @@ def test_internal_mode_requires_workbench_token() -> None:
 
 def _shortage_input() -> RunInput:
     data = RunInput.model_validate(_incoming("source.txt", b"Published tender terms."))
+    assert data.facts is not None
     return data.model_copy(
         update={
             "facts": data.facts.model_copy(
@@ -305,6 +308,7 @@ def _extraction(run: Run, view: JobView) -> AgentResult:
 
 async def test_loss_is_sent_to_solver_before_risk(monkeypatch: MonkeyPatch) -> None:
     inputs = _shortage_input()
+    assert inputs.facts is not None
     inputs = inputs.model_copy(
         update={"facts": inputs.facts.model_copy(update={"offer_price": Decimal(10)})}
     )
@@ -329,6 +333,66 @@ async def test_loss_is_sent_to_solver_before_risk(monkeypatch: MonkeyPatch) -> N
         await workbench_flow._start(http, _settings(), run)
     assert run.phase == "declined"
     assert calls == ["/api/v1/jobs", "solve"]
+
+
+async def test_document_only_intake_waits_for_confirmation_and_preserves_source() -> None:
+    incoming = _incoming("source.pdf", _pdf())
+    del incoming["facts"]
+    del incoming["context"]
+    run = _run(RunInput.model_validate(incoming))
+    file_id = run.uploads[0].document.file_id
+    requirement_id = uuid4()
+    block_id = uuid4()
+    trace_id = uuid5(run.id, "trace")
+    settings = _settings().model_copy(
+        update={"web_docintel_url": httpx.URL("http://th-docintel:8006")}
+    )
+
+    def response(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/extract"
+        assert request.headers["X-Trace-Id"] == str(trace_id)
+        assert str(file_id).encode() in request.read()
+        return httpx.Response(
+            200,
+            json={
+                "job_id": str(run.id),
+                "trace_id": str(trace_id),
+                "status": "INCOMPLETE",
+                "status_reason": "Проверьте условие",
+                "requirements": [
+                    {
+                        "requirement_id": str(requirement_id),
+                        "text": "Пеня 0,15 % за каждый день просрочки.",
+                        "kind": "penalty",
+                        "mandatory": True,
+                        "value": "0.0015",
+                        "unit": "fraction_per_day",
+                        "source": {
+                            "file_id": str(file_id),
+                            "page": 2,
+                            "block_id": str(block_id),
+                            "bbox": [0, 10, 100, 20],
+                        },
+                        "confidence": 0.4,
+                        "needs_review": True,
+                        "template_set_version": "ts-2026-11-1",
+                    }
+                ],
+                "numbers": [],
+                "table": {"rows": [], "sum_check": None},
+                "warnings": [],
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as http:
+        await workbench_flow._start(http, settings, run)
+
+    assert run.phase == "awaiting_extraction_confirmation"
+    assert run.view is None
+    assert run.extraction_review is not None
+    requirement = run.extraction_review.requirements[0]
+    assert requirement.source.file_id == file_id and requirement.source.page == 2
+    assert requirement.needs_review
 
 
 async def test_corrected_solve_keeps_original_inputs_and_forwards_persisted_confirmation(

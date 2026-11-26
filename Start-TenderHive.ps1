@@ -70,6 +70,7 @@ try {
         '--profile', 'dashboard', '--profile', 'web', '--profile', 'orchestrator',
         '--profile', 'solver', '--profile', 'agents', '--profile', 'eval',
         '--profile', 'modelgw', '--profile', 'kb', '--profile', 'demo'
+        '--profile', 'docintel'
     )
     if ($Stop) {
         docker compose @compose stop
