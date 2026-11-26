@@ -140,6 +140,60 @@ services:
       retries: 10
       start_period: 5s
 
+  th-docintel-core:
+    profiles: ["docintel"]
+    build:
+      context: ./services/th-docintel
+      dockerfile: cpp/Dockerfile
+    env_file:
+      - ./services/th-docintel/.env.example
+      - path: ./services/th-docintel/.env
+        required: false
+    healthcheck:
+      test: ["CMD", "/app/docintel-core", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  th-docintel:
+    profiles: ["docintel"]
+    build:
+      context: .
+      dockerfile: services/th-docintel/Dockerfile
+    env_file:
+      - ./services/th-docintel/.env.example
+      - path: ./services/th-docintel/.env
+        required: false
+    environment:
+      DOCINTEL_GRPC_HOST: th-docintel-core
+      DOCINTEL_BIND_HOST: 0.0.0.0
+      DOCINTEL_PORT: ${DOCINTEL_PORT:-8000}
+    ports:
+      - "127.0.0.1:${DOCINTEL_HOST_PORT:-8005}:${DOCINTEL_PORT:-8000}"
+    depends_on:
+      th-docintel-core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-m", "tender_docintel", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  th-docintel-tests:
+    profiles: ["docintel"]
+    build:
+      context: .
+      dockerfile: services/th-docintel/Dockerfile
+      target: test
+    environment:
+      DOCINTEL_E2E_URL: http://th-docintel:8000
+    depends_on:
+      th-docintel:
+        condition: service_healthy
+    command: ["python", "tests/compose_smoke.py"]
+
   th-agents:
     profiles: ["agents"]
     build:

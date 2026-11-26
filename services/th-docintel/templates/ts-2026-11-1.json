@@ -1,0 +1,65 @@
+{
+  "version": "ts-2026-11-1",
+  "templates": [
+    {
+      "id": "penalty",
+      "kind": "penalty",
+      "mandatory": true,
+      "requires_value": true,
+      "confidence": 1.0,
+      "patterns": ["штраф", "пеня", "пени", "пеню", "пеней", "неустойка", "неустойки", "неустойку"],
+      "exclude_patterns": [],
+      "context_patterns": []
+    },
+    {
+      "id": "deadline",
+      "kind": "deadline",
+      "mandatory": true,
+      "requires_value": true,
+      "confidence": 1.0,
+      "patterns": ["срок поставки", "срок исполнения", "дата окончания подачи", "срок действия"],
+      "exclude_patterns": [],
+      "context_patterns": []
+    },
+    {
+      "id": "security",
+      "kind": "security",
+      "mandatory": true,
+      "requires_value": true,
+      "confidence": 1.0,
+      "patterns": ["обеспечение предложения", "обеспечение исполнения договора", "обеспечение заявки"],
+      "exclude_patterns": [],
+      "context_patterns": []
+    },
+    {
+      "id": "qualification",
+      "kind": "qualification",
+      "mandatory": true,
+      "requires_value": false,
+      "confidence": 1.0,
+      "patterns": ["квалификацион", "опыт выполнения", "наличие лицензии", "аккредитац", "электронная цифровая подпись"],
+      "exclude_patterns": [],
+      "context_patterns": []
+    },
+    {
+      "id": "resource",
+      "kind": "resource",
+      "mandatory": true,
+      "requires_value": false,
+      "confidence": 1.0,
+      "patterns": ["наличие ресурсов", "трудовые ресурсы", "материальные ресурсы", "производственные мощности"],
+      "exclude_patterns": [],
+      "context_patterns": []
+    },
+    {
+      "id": "financial",
+      "kind": "financial",
+      "mandatory": true,
+      "requires_value": false,
+      "confidence": 1.0,
+      "patterns": ["цена предложения", "стоимость договора", "цена за единицу", "сумма обеспечения"],
+      "exclude_patterns": [],
+      "context_patterns": []
+    }
+  ]
+}

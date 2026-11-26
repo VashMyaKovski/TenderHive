@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package tenderhive.docintel.v1;
+
+service DocIntel {
+  rpc ExtractRequirements(ExtractRequirementsRequest) returns (ExtractRequirementsResponse);
+  rpc CheckHealth(HealthRequest) returns (HealthResponse);
+}
+
+enum BlockKind {
+  BLOCK_KIND_UNSPECIFIED = 0;
+  BLOCK_KIND_TEXT = 1;
+  BLOCK_KIND_TABLE_CELL = 2;
+  BLOCK_KIND_TABLE_ROW = 3;
+}
+
+enum ExtractionStatus {
+  EXTRACTION_STATUS_UNSPECIFIED = 0;
+  EXTRACTION_STATUS_OK = 1;
+  EXTRACTION_STATUS_INCOMPLETE = 2;
+  EXTRACTION_STATUS_REJECTED = 3;
+}
+
+message BoundingBox {
+  double x0 = 1;
+  double y0 = 2;
+  double x1 = 3;
+  double y1 = 4;
+}
+
+message Block {
+  string block_id = 1;
+  uint32 page = 2;
+  string text = 3;
+  BoundingBox bbox = 4;
+  BlockKind kind = 5;
+  double ocr_confidence = 6;
+}
+
+message ExtractRequirementsRequest {
+  string job_id = 1;
+  string job_doc_id = 2;
+  repeated Block blocks = 3;
+  string template_set_version = 4;
+}
+
+message Requirement {
+  string template_id = 1;
+  string text = 2;
+  string kind = 3;
+  bool mandatory = 4;
+  string value = 5;
+  string unit = 6;
+  string source_block_id = 7;
+  uint32 page = 8;
+  BoundingBox bbox = 9;
+  double confidence = 10;
+  bool needs_review = 11;
+}
+
+message NumberValue {
+  string value = 1;
+  string unit = 2;
+  string kind = 3;
+  string condition = 4;
+  string role = 5;
+  string source_block_id = 6;
+  uint32 page = 7;
+  BoundingBox bbox = 8;
+  double confidence = 9;
+}
+
+message ExtractRequirementsResponse {
+  string job_id = 1;
+  repeated Requirement requirements = 2;
+  repeated NumberValue numbers = 3;
+  ExtractionStatus status = 4;
+  string status_reason = 5;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ready = 1;
+}
