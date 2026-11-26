@@ -24,6 +24,8 @@ docker compose ps
 
 Контролируемый регрессионный прогон `th-eval` запускается командой `docker compose --env-file .env.example run --build --rm th-eval`. Настройки live-прогона, формат отчётов и сравнение версий описаны в [документации модуля](services/th-eval/README.md).
 
+`th-docintel` и его C++ gRPC-ядро запускаются профилем `docintel`; внутреннее API принимает PDF, DOCX и изображения, а результат извлечения описан в [контракте](contracts/docintel_v1.py) и [документации сервиса](services/th-docintel/README.md).
+
 Пример вызова `th-agents` через A2A оценивает условие о пене из опубликованной закупки. Команды для тестового и модельного шлюза приведены в [документации агента](services/th-agents/README.md).
 
 `th-orchestrator` проводит то же задание через оценку риска, карточку согласования и продолжение после перезапуска. [Сценарий с PostgreSQL и тестовым шлюзом](services/th-orchestrator/README.md)
@@ -47,7 +49,7 @@ docker compose --profile kb --profile solver --profile integrations up --build -
 
 Для локального мониторинга запустите `docker compose --profile monitoring up --wait`. OpenTelemetry Collector принимает метрики по OTLP/gRPC на `127.0.0.1:4317` и OTLP/HTTP на `127.0.0.1:4318`. Prometheus доступен на `http://127.0.0.1:9090`, Grafana с настроенным источником Prometheus — на `http://127.0.0.1:3000`. Учётные данные Grafana задаются в `.env`. Инструментирование приложений и хранение трассировок добавляются вместе с сервисами.
 
-Остановить стек можно командой `docker compose --profile monitoring --profile modelgw --profile eval --profile agents --profile orchestrator --profile kb --profile solver --profile integrations down`. Именованные тома PostgreSQL, Neo4j, Qdrant, Kafka и отчётов `th-eval` сохраняются.
+Остановить стек можно командой `docker compose --profile monitoring --profile modelgw --profile eval --profile agents --profile orchestrator --profile kb --profile solver --profile integrations --profile docintel down`. Именованные тома PostgreSQL, Neo4j, Qdrant, Kafka и отчётов `th-eval` сохраняются.
 
 ## Проверки
 

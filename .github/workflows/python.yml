@@ -82,16 +82,44 @@ jobs:
           uv run --locked ruff format --check .
           uv run --locked pyright
           uv run --locked pytest
+      - name: Check document intelligence API
+        working-directory: services/th-docintel
+        run: |
+          uv sync --locked
+          uv run --locked ruff check .
+          uv run --locked ruff format --check .
+          uv run --locked pyright
+          uv run --locked pytest
+
+  docintel-cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install C++ gRPC build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cmake g++ libgrpc++-dev libgtest-dev libprotobuf-dev nlohmann-json3-dev protobuf-compiler protobuf-compiler-grpc
+      - name: Build and test C++ extraction core
+        working-directory: services/th-docintel
+        run: |
+          cmake -S cpp -B build -DBUILD_TESTING=ON
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
 
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - run: docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval --profile agents --profile orchestrator --profile kb --profile solver --profile integrations config --quiet
+      - run: docker compose --env-file .env.example --profile monitoring --profile setup --profile modelgw --profile eval --profile agents --profile orchestrator --profile kb --profile solver --profile integrations --profile docintel config --quiet
       - run: docker compose --env-file .env.example run --build --rm th-eval
       - run: docker compose --env-file .env.example --profile monitoring up --wait --wait-timeout 180
       - run: docker compose --env-file .env.example run --rm kafka-init
+      - name: Start document intelligence service
+        run: |
+          docker compose --env-file .env.example --profile docintel up --build --wait --wait-timeout 180 th-docintel
+          docker compose --env-file .env.example --profile docintel run --build --rm th-docintel-tests
+          docker compose --env-file .env.example --profile docintel down
       - name: Check monitoring endpoints
         run: |
           curl --fail --silent --show-error --retry 12 --retry-connrefused \
@@ -113,10 +141,10 @@ jobs:
             -e TH_EVAL_PROMPT_VERSION=ci-unsupported-prompt th-eval run --live
       - name: Print container logs on failure
         if: failure()
-        run: docker compose --env-file .env.example --profile monitoring --profile modelgw --profile eval logs --no-color
+        run: docker compose --env-file .env.example --profile monitoring --profile modelgw --profile eval --profile docintel logs --no-color
       - name: Stop the stack
         if: always()
-        run: docker compose --env-file .env.example --profile monitoring --profile modelgw --profile eval down
+        run: docker compose --env-file .env.example --profile monitoring --profile modelgw --profile eval --profile docintel down
 
   risk-agent-compose:
     runs-on: ubuntu-latest

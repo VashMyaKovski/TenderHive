@@ -142,13 +142,17 @@ class Solver:
     def _compliance(self, requirements: list[Requirement], matched: list[Rule]) -> list[Compliance]:
         items: list[Compliance] = []
         for requirement in requirements:
-            if requirement.confidence < self._confidence_floor:
+            if requirement.needs_review or requirement.confidence < self._confidence_floor:
                 items.append(
                     Compliance(
                         requirement_id=requirement.requirement_id,
                         status="NEEDS_REVIEW",
                         rule_id=None,
-                        reason="low extraction confidence",
+                        reason=(
+                            "low extraction confidence"
+                            if requirement.confidence < self._confidence_floor
+                            else "extraction marked for review"
+                        ),
                         source_ref=requirement.source_ref,
                     )
                 )
@@ -218,10 +222,15 @@ class Solver:
         for requirement in request.requirements:
             if requirement.kind != "penalty":
                 continue
+            if requirement.needs_review:
+                escalation = True
+                continue
             daily = _percent(requirement.value)
             if daily is None:
                 escalation = True
                 continue
+            if requirement.unit in {"fraction", "fraction_per_day"}:
+                daily *= 100
             try:
                 assessment = await self._risk.assess(
                     requirement.text,

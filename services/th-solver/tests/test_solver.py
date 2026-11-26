@@ -1,3 +1,4 @@
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -99,6 +100,43 @@ async def test_penalty_risk_uses_gateway(settings: Settings) -> None:
     assert risk.calls == 1
     assert result.risks[0].level == "high"
     assert any(stop.code == "UNCLEAR_REQUIREMENTS" for stop in result.stop_reasons)
+
+
+async def test_docintel_requirement_contract_is_accepted(settings: Settings) -> None:
+    penalty_rule = rule().model_copy(update={"scope": "penalty"})
+    solver, _, risk, _ = build_solver(
+        settings, FakeKnowledge(context(rules=[penalty_rule])), FakeRisk(level="low")
+    )
+    source_block_id = uuid4()
+    docintel_requirement = {
+        "requirement_id": str(uuid4()),
+        "text": "штраф 0,15 % в день, но не более 10 %",
+        "kind": "penalty",
+        "mandatory": True,
+        "value": "0.0015",
+        "unit": "fraction_per_day",
+        "source": {
+            "file_id": str(uuid4()),
+            "page": 7,
+            "block_id": str(source_block_id),
+            "bbox": [10.0, 20.0, 400.0, 35.0],
+        },
+        "confidence": 0.95,
+        "needs_review": False,
+        "template_set_version": "ts-2026-11-1",
+    }
+
+    result = await solver.solve(
+        request(
+            requirements=[docintel_requirement],
+            facts=[FactInput(key="margin_percent", value=12)],
+        )
+    )
+
+    assert result.status == "READY"
+    assert risk.calls == 1
+    assert risk.daily_percents == [Decimal("0.1500")]
+    assert result.requirements[0].source_ref.endswith(f"block:{source_block_id}")
 
 
 async def test_unknown_version_is_rejected(settings: Settings) -> None:

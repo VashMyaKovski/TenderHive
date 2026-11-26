@@ -1,7 +1,9 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints, model_validator
+
+from contracts.docintel_v1 import SourceReference
 
 Identifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,199}$")]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=12_000)]
@@ -14,11 +16,34 @@ class Contract(BaseModel):
 class Requirement(Contract):
     requirement_id: UUID
     text: Text
-    kind: Literal["penalty", "deadline", "security", "qualification", "resource", "other"]
+    kind: Literal[
+        "penalty", "deadline", "security", "qualification", "resource", "financial", "other"
+    ]
     value: str | None = None
     mandatory: bool
     confidence: Annotated[float, Field(ge=0, le=1)]
     source_ref: Text
+    unit: str | None = None
+    source: SourceReference | None = None
+    needs_review: bool = False
+    template_set_version: Identifier | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_source_reference(cls, value: object) -> object:
+        if not isinstance(value, dict) or "source_ref" in value:
+            return value
+        source = value.get("source")
+        if not isinstance(source, dict):
+            return value
+        file_id = source.get("file_id")
+        page = source.get("page")
+        block_id = source.get("block_id")
+        if file_id is None or page is None or block_id is None:
+            return value
+        updated = dict(value)
+        updated["source_ref"] = f"{file_id}:page:{page}:block:{block_id}"
+        return updated
 
 
 class FactInput(Contract):

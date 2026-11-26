@@ -37,6 +37,7 @@ class FakeRisk:
         self.reason = reason
         self.level = level
         self.calls = 0
+        self.daily_percents: list[Decimal] = []
 
     async def assess(
         self,
@@ -47,6 +48,7 @@ class FakeRisk:
         threshold: Decimal,
     ) -> RiskAssessment:
         self.calls += 1
+        self.daily_percents.append(daily_percent)
         return RiskAssessment(
             level=self.level,
             summary=f"penalty {daily_percent}% versus {threshold}%",
