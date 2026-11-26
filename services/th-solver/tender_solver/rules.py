@@ -1,3 +1,4 @@
+import re
 from collections import defaultdict
 from decimal import Decimal
 from operator import ge, gt, le, lt
@@ -11,6 +12,7 @@ from contracts.models import (
     Explanation,
     PreparationPlan,
     Recommendation,
+    Requirement,
     ResourceCheck,
     Risk,
     SolverResult,
@@ -29,6 +31,28 @@ from tender_solver.models import (
 )
 
 _COMPARISONS = {"gt": gt, "gte": ge, "lt": lt, "lte": le}
+_OFFER_VALIDITY_FIELD = "offer_validity_workdays"
+_DEMO_OFFER_VALIDITY_RULE = "R-DEMO-OFFER-VALIDITY"
+_OFFER_VALIDITY = re.compile(
+    r"\b(?:срок действия (?:(?:коммерческого|ценового|тендерного) )?"
+    r"(?:предложения|оферты|заявки)|offer validity|bid validity)\b"
+)
+_MINIMUM = re.compile(
+    r"\b(?:не менее(?: чем)?|не короче|минимум|от|at least|minimum(?: of)?) "
+    r"([0-9]{1,4})(?![0-9,.])"
+)
+
+
+def _required_workdays(requirement: Requirement, normalized_text: str) -> int | None:
+    if requirement.unit not in {"business_days", "рабочих дней", "working days"}:
+        return None
+    value = requirement.value
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{1,4}", value):
+        value = int(value)
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    minima = {int(match.group(1)) for match in _MINIMUM.finditer(normalized_text)}
+    return value if minima == {value} else None
 
 
 def _same(left: Scalar, right: Scalar) -> bool:
@@ -133,6 +157,7 @@ def solve(
     for requirement in request.requirements:
         applicable: list[tuple[int, Consequence, Fact, str, JsonValue]] = []
         indeterminate = requirement.needs_review
+        requirement_text = " ".join(requirement.text.casefold().split())
         for rule in rules["*"] + rules[requirement.kind]:
             try:
                 condition = Condition.model_validate(rule.get("condition"))
@@ -140,6 +165,16 @@ def solve(
             except ValidationError:
                 indeterminate = True
                 continue
+            minimum_workdays = None
+            if condition.field == _OFFER_VALIDITY_FIELD:
+                if requirement.kind != "deadline" or not _OFFER_VALIDITY.search(requirement_text):
+                    continue
+                if rule["rule_id"] == _DEMO_OFFER_VALIDITY_RULE:
+                    minimum_workdays = _required_workdays(requirement, requirement_text)
+                    if minimum_workdays is None:
+                        indeterminate = True
+                        continue
+                    condition = Condition(field=condition.field, op="gte", value=minimum_workdays)
             candidates = facts[condition.field]
             if not candidates or any(
                 not _same(item.value, candidates[0].value) for item in candidates
@@ -147,7 +182,19 @@ def solve(
                 indeterminate = True
                 continue
             fact = candidates[0]
-            if _matches(fact.value, condition):
+            matched = _matches(fact.value, condition)
+            if minimum_workdays is not None:
+                if not isinstance(fact.value, int) or isinstance(fact.value, bool):
+                    indeterminate = True
+                    continue
+                consequence = Consequence(
+                    status="MET" if matched else "NOT_MET",
+                    reason=(
+                        f"Предложение действительно {fact.value} раб. дн., "
+                        f"документация требует не менее {minimum_workdays} раб. дн."
+                    ),
+                )
+            if matched or minimum_workdays is not None:
                 priority = rule.get("priority")
                 applicable.append(
                     (
