@@ -842,8 +842,9 @@ async def test_kafka_intake_decision_outbox_and_redis_checkpoint(
     job_id = request_body.job.job_id
     key = str(job_id).encode()
     brokers = ",".join(settings.kafka_brokers)
+    test_settings = settings.model_copy(update={"kafka_group_id": f"orchestrator-test-{job_id}"})
     async with (
-        running(settings, clock, agent) as api,
+        running(test_settings, clock, agent) as api,
         AIOKafkaProducer(bootstrap_servers=brokers, acks="all") as producer,
         AIOKafkaConsumer(
             "tender.human.required",
