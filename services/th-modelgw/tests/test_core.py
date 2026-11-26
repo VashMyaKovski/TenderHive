@@ -72,6 +72,7 @@ def test_risk_requires_a_single_rules_snapshot_and_fact() -> None:
         ("0.15", "0.15", "high", 0.9, 0.9, "penalty_above_threshold"),
         ("0.1", "0.1", "low", 0.4, 0.4, "unclear_requirements"),
         ("0.1", "0.1", "low", 0.8, 0.8, None),
+        ("0.05", "0.05", "high", 0.9, 0.9, "unclear_requirements"),
     ],
 )
 def test_authoritative_rule_and_human_review(
@@ -119,3 +120,15 @@ def test_vision_reencodes_inline_image_without_metadata() -> None:
     mime, data = image_url.split(",", 1)
     assert mime == "data:image/jpeg;base64"
     assert b"test-private-author" not in b64decode(data)
+
+
+def test_vision_discards_pixels_hidden_by_transparency() -> None:
+    source = BytesIO()
+    Image.new("RGBA", (3, 3), (255, 0, 0, 0)).save(source, format="PNG")
+    request = request_for(
+        "vision", [{"type": "public_image", "data": b64encode(source.getvalue()).decode()}]
+    )
+    image_url = prepare_context(request).image_url
+    assert image_url is not None
+    with Image.open(BytesIO(b64decode(image_url.split(",", 1)[1]))) as output:
+        assert output.getpixel((0, 0)) == (255, 255, 255)

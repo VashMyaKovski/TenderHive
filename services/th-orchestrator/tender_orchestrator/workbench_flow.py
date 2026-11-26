@@ -1,0 +1,731 @@
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, time
+from decimal import Decimal
+from pathlib import Path
+from typing import Annotated
+from uuid import UUID, uuid4, uuid5
+
+import httpx
+from pydantic import Field, HttpUrl, JsonValue, SecretStr
+
+from contracts.agent_task import AgentResult, ModelCall
+from contracts.models import Artifact, Estimate, Job, Recommendation, SolverResult, StopReason
+from contracts.risk_task_v1 import Percent, RiskResultV1
+from tender_orchestrator.demo_flow import (
+    DemoSettings,
+    _auth,
+    _ok,
+    _post_job,
+    _url,
+    _verify_content,
+    agent,
+)
+from tender_orchestrator.models import JobView, ReviewCard, SupplyConfirmation
+from tender_orchestrator.workbench_extraction import (
+    ExtractionReview,
+    confirmed_daily_penalty,
+    extract,
+)
+from tender_orchestrator.workbench_inputs import (
+    DEMO_MINIMUM_VALIDITY_WORKDAYS,
+    DecisionInput,
+    Facts,
+    RunInput,
+    Upload,
+    decimal_text,
+    has_readable_text,
+)
+
+_LOG = logging.getLogger("uvicorn.error.workbench")
+_LABELS = {
+    "extraction": "Проверка входных требований",
+    "legal": "Проверка условий закупки",
+    "resource": "Проверка наличия",
+    "estimate": "Расчёт сметы",
+    "document": "Подготовка комплекта",
+}
+_REASONS: dict[StopReason, str] = {
+    "PENALTY_ABOVE_THRESHOLD": "Штраф превышает порог демонстрационного профиля.",
+    "LOW_MARGIN": "Расчётная маржа ниже порога.",
+    "RESOURCE_GAP": "Доступного количества не хватает.",
+    "UNCLEAR_REQUIREMENTS": "Одно из требований нуждается в проверке.",
+    "NO_SOLUTION": "Решатель не нашёл допустимый вариант.",
+    "FINAL_APPROVAL": "Требуется итоговое согласование.",
+}
+
+
+class WorkbenchSettings(DemoSettings):
+    web_url: HttpUrl
+    web_port: Annotated[int, Field(ge=1, le=65535)]
+    web_max_runs: Annotated[int, Field(ge=1, le=64)]
+    web_margin_threshold_percent: Percent
+    web_penalty_threshold_percent: Percent
+    web_profile_ref: str
+    web_service_token: Annotated[SecretStr, Field(min_length=32)] | None = None
+    web_docintel_url: HttpUrl | None = None
+    web_database_dsn: SecretStr | None = None
+    web_storage_dir: Path | None = None
+
+
+@dataclass(slots=True)
+class Run:
+    id: UUID
+    title: str
+    facts: Facts | None
+    context: str | None
+    uploads: list[Upload]
+    normalization: Upload
+    view: JobView | None = None
+    extraction: AgentResult | None = None
+    task: asyncio.Task[None] | None = None
+    error: str | None = None
+    messages: list[dict[str, JsonValue]] = field(default_factory=list)
+    artifacts: dict[str, bytes] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    extraction_review: ExtractionReview | None = None
+    extraction_confirmed: bool = False
+    pending: bool = False
+    pending_decision: DecisionInput | None = None
+    save: Callable[[Run], Awaitable[None]] | None = None
+
+    async def checkpoint(self) -> None:
+        if self.save is not None:
+            await self.save(self)
+
+    @property
+    def card(self) -> ReviewCard | None:
+        if self.view is None:
+            return None
+        return next((card for card in self.view.cards if card.state == "open"), None)
+
+    @property
+    def is_running(self) -> bool:
+        return self.pending or (self.task is not None and not self.task.done())
+
+    @property
+    def phase(self) -> str:
+        if self.error is not None:
+            return "failed"
+        if self.extraction_review is not None and not self.extraction_confirmed:
+            if self.extraction_review.status in {"FAILED", "REJECTED"}:
+                return "extraction_failed"
+            return "awaiting_extraction_confirmation"
+        return self.view.phase if self.view is not None else "queued"
+
+    @staticmethod
+    def is_risk_review(card: ReviewCard) -> bool:
+        return card.step.startswith("risk_") or card.reason_code == "PENALTY_ABOVE_THRESHOLD"
+
+    def requires_comment(self, card: ReviewCard) -> bool:
+        return self.is_risk_review(card) or card.reason_code == "LOW_MARGIN"
+
+    def supply_requirement(self, card: ReviewCard) -> dict[str, object] | None:
+        if card.reason_code != "RESOURCE_GAP" or self.facts is None:
+            return None
+        return {
+            "shortage": decimal_text(
+                max(Decimal(0), self.facts.quantity - self.facts.available_quantity)
+            ),
+            "delivery_deadline": self.facts.delivery_deadline,
+        }
+
+    def message(
+        self,
+        sender: str,
+        recipient: str,
+        status: str,
+        text: str,
+        details: dict[str, JsonValue] | None,
+    ) -> None:
+        self.messages.append(
+            {
+                "id": str(uuid4()),
+                "agent": sender,
+                "to": recipient,
+                "status": status,
+                "text": text,
+                "at": datetime.now(UTC).isoformat(),
+                "details": details,
+            }
+        )
+
+    def snapshot(self) -> dict[str, object]:
+        card = self.card
+        view = self.view
+        result = view.solver_result if view is not None else None
+        failure = view.failure if view is not None else None
+        confirmation = _supply_confirmation(view) if view is not None else None
+        return {
+            "id": str(self.id),
+            "title": self.title,
+            "status": "ERROR" if self.error else (view.job.status if view else "ACCEPTED"),
+            "phase": self.phase,
+            "trace_id": str(view.job.trace_id)
+            if view and view.job.trace_id
+            else str(uuid5(self.id, "trace")),
+            "documents": [
+                {
+                    "file_id": str(upload.document.file_id),
+                    "name": upload.document.name,
+                    "size": len(upload.data),
+                }
+                for upload in self.uploads
+            ],
+            "extraction": self.extraction_review.model_dump(mode="json")
+            if self.extraction_review is not None
+            else None,
+            "facts": self.facts.model_dump(mode="json") if self.facts is not None else None,
+            "context": self.context,
+            "is_running": self.is_running,
+            "messages": self.messages,
+            "recommendation": _recommendation(result, self.facts, confirmation)
+            if result is not None and self.facts is not None
+            else None,
+            "card": (
+                {
+                    "id": str(card.card_id),
+                    "reason": card.reason_code,
+                    "role": card.role,
+                    "question": card.question,
+                    "requires_comment": self.requires_comment(card),
+                    "supply": self.supply_requirement(card),
+                }
+                if card and self.error is None and not self.is_running
+                else None
+            ),
+            "risk_decisions": [
+                {
+                    "reason": review.reason_code,
+                    "role": review.decision.role,
+                    "decision": {"continue": "APPROVED", "stop": "REJECTED"}.get(
+                        review.decision.decision, review.decision.decision
+                    ),
+                    "comment": review.decision.comment,
+                }
+                for review in (view.cards if view is not None else [])
+                if self.is_risk_review(review) and review.decision is not None
+            ],
+            "artifacts": [
+                {"name": name, "url": f"/api/workbench/runs/{self.id}/artifacts/{name}"}
+                for name in self.artifacts
+            ]
+            if self.phase == "done"
+            else [],
+            "error": self.error or (f"Ошибка этапа ({failure.code})." if failure else None),
+        }
+
+
+def _supply_confirmation(view: JobView) -> SupplyConfirmation | None:
+    return next(
+        (
+            card.supply_confirmation
+            for card in reversed(view.cards)
+            if card.reason_code == "RESOURCE_GAP" and card.supply_confirmation is not None
+        ),
+        None,
+    )
+
+
+def _recommendation(
+    result: SolverResult, facts: Facts, confirmation: SupplyConfirmation | None
+) -> dict[str, object]:
+    recommendation = result.recommendation
+    reasons = [_REASONS[reason] for reason in result.stop_reasons]
+    for item in result.compliance:
+        if item.status == "MET":
+            reasons.append("Правило о сроке действия предложения выполнено.")
+        else:
+            reasons.append(item.reason)
+    for item in result.resources:
+        if item.covered:
+            reasons.append("Доступного количества достаточно для заявки.")
+        else:
+            reasons.append(f"Недостающее количество: {item.shortage}.")
+    if isinstance(result.estimate, Estimate):
+        reasons.append(
+            f"Расчётная маржа {result.estimate.margin_percent:.2f}%, "
+            f"порог {result.estimate.threshold:g}%."
+        )
+        if result.estimate.margin_percent < 0:
+            loss = result.estimate.total_cost - result.estimate.offer_price
+            reasons.append(f"Расчётный убыток {loss:.2f} BYN.")
+    if confirmation is not None and facts.delivery_deadline is not None:
+        if confirmation.delivery_date > facts.delivery_deadline:
+            reasons.append(
+                f"Подтверждённая дата {confirmation.delivery_date:%d.%m.%Y} позже "
+                f"крайнего срока {facts.delivery_deadline:%d.%m.%Y}."
+            )
+        else:
+            reasons.append(
+                f"Подтверждён объём {confirmation.quantity:g} ед. на "
+                f"{confirmation.delivery_date:%d.%m.%Y}. "
+                f"Дополнительные затраты — {confirmation.additional_cost:.2f} BYN."
+            )
+    reasons.extend(item.basis for item in result.risks)
+    if not reasons:
+        reasons.append("В отчёте решателя нет дополнительных пояснений.")
+    return {
+        "value": recommendation.value
+        if isinstance(recommendation, Recommendation)
+        else result.status,
+        "status": result.status,
+        "reasons": list(dict.fromkeys(reasons)),
+        "conditions": recommendation.conditions
+        if isinstance(recommendation, Recommendation)
+        else [],
+    }
+
+
+def _source(run: Run) -> dict[str, str]:
+    return {
+        "url": run.normalization.document.storage_path,
+        "locator": "Открытый фрагмент и сведения, предоставленные оператором",
+    }
+
+
+def _risk_source(run: Run, context: str) -> dict[str, str]:
+    if run.extraction_review is not None:
+        for item in run.extraction_review.requirements:
+            if context == item.text:
+                source = item.source
+                for upload in run.uploads:
+                    if upload.document.file_id == source.file_id:
+                        return {
+                            "url": upload.document.storage_path,
+                            "locator": f"{upload.document.name}, страница {source.page}",
+                        }
+    return _source(run)
+
+
+def _requirement(run: Run) -> dict[str, JsonValue]:
+    return {
+        "requirement_id": str(uuid5(run.id, "validity")),
+        "text": (
+            f"Срок действия предложения от {DEMO_MINIMUM_VALIDITY_WORKDAYS} рабочих дней "
+            "по демонстрационному правилу"
+        ),
+        "kind": "deadline",
+        "mandatory": True,
+        "value": DEMO_MINIMUM_VALIDITY_WORKDAYS,
+        "unit": "рабочих дней",
+        "source": {
+            "file_id": str(run.normalization.document.file_id),
+            "page": 1,
+            "block_id": str(uuid5(run.id, "normalized-input")),
+            "bbox": [0, 0, 0, 0],
+        },
+        "confidence": 1,
+        "needs_review": False,
+        "template_set_version": "demo-v1",
+    }
+
+
+async def _ask(
+    http: httpx.AsyncClient,
+    settings: WorkbenchSettings,
+    run: Run,
+    view: JobView,
+    role: str,
+    payload: dict[str, object],
+) -> AgentResult:
+    label = _LABELS[role]
+    run.message("orchestrator", role, "SENT", label, None)
+    result = await agent(http, settings, view, role, payload)
+    run.message(
+        role,
+        "orchestrator",
+        result.status,
+        label,
+        {
+            "task_id": str(result.task_id),
+            "result": result.result,
+            "evidence": [item for item in result.evidence],
+        },
+    )
+    if result.status == "FAILED":
+        raise RuntimeError(f"Agent {role} reported failure")
+    return result
+
+
+def _risk_result(risk: RiskResultV1, reviewed: bool) -> AgentResult:
+    return AgentResult(
+        task_id=risk.task_id,
+        job_id=risk.job_id,
+        agent_role="risk",
+        status="DONE" if reviewed or risk.human_reason is None else "NEEDS_REVIEW",
+        result={"summary": risk.summary, "risk_level": risk.risk_level},
+        evidence=[item.model_dump(mode="json") for item in risk.sources],
+        model_calls=[
+            ModelCall(
+                trace_id=risk.trace_id,
+                model_version=risk.model_version,
+                prompt_version=risk.prompt_version,
+            )
+        ],
+        trace_id=risk.trace_id,
+    )
+
+
+async def _solve(
+    http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run, view: JobView
+) -> JobView:
+    facts = run.facts
+    assert facts is not None and run.context is not None
+    confirmation = _supply_confirmation(view)
+    deadline = facts.delivery_deadline
+    effective_available = facts.available_quantity
+    if confirmation is not None and deadline is not None and confirmation.delivery_date <= deadline:
+        effective_available = min(
+            max(facts.available_quantity, facts.quantity),
+            effective_available + confirmation.quantity,
+        )
+    source = _source(run)
+    position = {
+        "position_id": "uploaded-lot",
+        "required_quantity": decimal_text(facts.quantity),
+        "available_quantity": decimal_text(effective_available),
+        "source": source,
+    }
+    specialists = await asyncio.gather(
+        _ask(
+            http,
+            settings,
+            run,
+            view,
+            "legal",
+            {
+                "regime": "commercial",
+                "regime_source": source,
+                "clauses": [
+                    {
+                        "text": run.context,
+                        "source": _risk_source(run, run.context),
+                        "requires_review": False,
+                    }
+                ],
+            },
+        ),
+        _ask(http, settings, run, view, "resource", {"positions": [position]}),
+        _ask(
+            http,
+            settings,
+            run,
+            view,
+            "estimate",
+            {
+                "currency": "BYN",
+                "offer_price": decimal_text(facts.offer_price),
+                "margin_threshold_percent": decimal_text(settings.web_margin_threshold_percent),
+                "threshold_source": source,
+                "positions": [
+                    {
+                        "position_id": position["position_id"],
+                        "quantity": position["required_quantity"],
+                        "unit_cost": decimal_text(facts.unit_cost),
+                        "source": source,
+                    }
+                ],
+            },
+        ),
+    )
+    if run.extraction is None:
+        raise RuntimeError("Missing validated requirements")
+    results = [*specialists, run.extraction]
+    if view.risk_result is not None:
+        results.append(
+            _risk_result(
+                view.risk_result, any(card.step.startswith("risk_") for card in view.cards)
+            )
+        )
+    run.message("orchestrator", "solver", "SENT", "Проверка правил и расчёт рекомендации", None)
+    trace = str(view.job.trace_id)
+    response = _ok(
+        await http.post(
+            _url(settings.solver_url, "/api/v1/solve"),
+            headers={"X-Trace-Id": trace},
+            json={
+                "job_id": str(run.id),
+                "kb_version": view.job.kb_version,
+                "trace_id": trace,
+                "as_of": view.job.created_at.date().isoformat(),
+                "lot_ids": view.job.lot_ids,
+                "requirements": run.extraction.result.get("requirements"),
+                "facts": [
+                    {
+                        "fact_id": str(uuid5(run.id, "validity-fact")),
+                        "key": "offer_validity_workdays",
+                        "value": facts.offer_validity_workdays,
+                        "source": run.normalization.document.storage_path,
+                    }
+                ],
+                "profile": {
+                    "regime": "commercial",
+                    "task_class": "supply",
+                    "positions": [
+                        {
+                            "position_id": position["position_id"],
+                            "description": run.title,
+                            "quantity": position["required_quantity"],
+                            "available": decimal_text(facts.available_quantity),
+                            "unit_cost": decimal_text(facts.unit_cost),
+                            "offer_unit_price": decimal_text(facts.offer_price / facts.quantity),
+                            "offer_total_price": decimal_text(facts.offer_price),
+                            "supply_deadline": datetime.combine(deadline, time.min, UTC).isoformat()
+                            if deadline is not None
+                            else None,
+                            "supply_confirmation": confirmation.model_dump(mode="json")
+                            if confirmation is not None
+                            else None,
+                            "alternatives": [],
+                        }
+                    ],
+                },
+                "agent_results": [item.model_dump(mode="json") for item in results],
+            },
+        )
+    )
+    result = SolverResult.model_validate_json(response.content)
+    run.message(
+        "solver",
+        "orchestrator",
+        result.status,
+        "Рекомендация рассчитана",
+        result.recommendation.model_dump(mode="json"),
+    )
+    return await _post_job(
+        http,
+        settings,
+        view,
+        "solver-result",
+        {"execution_id": str(view.execution_id), "result": result.model_dump(mode="json")},
+    )
+
+
+async def _generate(
+    http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run, view: JobView
+) -> JobView:
+    approval = next(
+        card.decision
+        for card in reversed(view.cards)
+        if card.reason_code == "FINAL_APPROVAL" and card.decision is not None
+    )
+    assert approval is not None and view.solver_result is not None
+    result = await _ask(
+        http,
+        settings,
+        run,
+        view,
+        "document",
+        {
+            "solver_result": view.solver_result.model_dump(mode="json"),
+            "approval": approval.model_dump(mode="json"),
+        },
+    )
+    raw = result.result.get("artifacts")
+    if not isinstance(raw, list):
+        raise RuntimeError("Missing generated artifacts")
+    artifacts: dict[str, bytes] = {}
+    for item in raw:
+        artifact = Artifact.model_validate(item)
+        reply = _ok(
+            await http.get(
+                _url(settings.agents_url, artifact.file_path),
+                headers=_auth(settings.artifact_token),
+            )
+        )
+        _verify_content(artifact, reply.content)
+        artifacts[f"offer.{artifact.kind.lower()}"] = reply.content
+    run.artifacts.update(artifacts)
+    await run.checkpoint()
+    view = await _post_job(
+        http,
+        settings,
+        view,
+        "artifacts",
+        {"execution_id": str(view.execution_id), "artifacts": raw},
+    )
+    return view
+
+
+async def _advance(http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run) -> None:
+    assert run.view is not None
+    view = run.view
+    if view.phase == "assessing":
+        async with asyncio.timeout(settings.timeout_seconds):
+            while view.phase == "assessing":
+                await asyncio.sleep(0.5)
+                reply = _ok(
+                    await http.get(
+                        _url(settings.orchestrator_url, f"/api/v1/jobs/{run.id}"),
+                        headers=_auth(settings.service_token),
+                    )
+                )
+                view = JobView.model_validate_json(reply.content)
+        run.view = view
+    if view.risk_result is not None and not any(m["agent"] == "risk" for m in run.messages):
+        result = view.risk_result
+        run.message(
+            "risk",
+            "orchestrator",
+            "NEEDS_REVIEW" if result.human_reason else "DONE",
+            result.summary,
+            {
+                "model": result.model_version,
+                "confidence": result.confidence,
+                "source": [item.model_dump(mode="json") for item in result.sources],
+            },
+        )
+    if view.phase == "ready_for_next_stage" and view.stage == "solve":
+        view = await _solve(http, settings, run, view)
+        run.view = view
+    if view.phase == "awaiting_artifacts":
+        run.view = await _generate(http, settings, run, view)
+
+
+async def _start(http: httpx.AsyncClient, settings: WorkbenchSettings, run: Run) -> None:
+    if settings.web_docintel_url is not None and not run.extraction_confirmed:
+        run.message("workbench", "docintel", "SENT", "Разбор документов", None)
+        run.extraction_review = await extract(
+            http, settings.web_docintel_url, run.id, uuid5(run.id, "trace"), run.uploads
+        )
+        run.message(
+            "docintel", "workbench", run.extraction_review.status, "Разбор документов", None
+        )
+        return
+    assert run.facts is not None and run.context is not None
+    if run.view is None:
+        readable = (
+            await asyncio.to_thread(lambda: sum(has_readable_text(file) for file in run.uploads))
+            if settings.web_docintel_url is None
+            else 0
+        )
+        summary = f"Файлов принято: {len(run.uploads)}."
+        if settings.web_docintel_url is None:
+            summary += f" С доступным текстом: {readable}."
+        run.message("workbench", "orchestrator", "DONE", summary, None)
+    job = Job(
+        job_id=run.id,
+        idempotency_key=str(run.id),
+        source="web",
+        created_at=run.created_at,
+        status="ACCEPTED",
+        kb_version=settings.kb_version,
+        lot_ids=["uploaded-lot"],
+        documents=[item.document for item in [*run.uploads, run.normalization]],
+        profile_ref=settings.web_profile_ref,
+        trace_id=uuid5(run.id, "trace"),
+    )
+    if run.view is None:
+        response = _ok(
+            await http.post(
+                _url(settings.orchestrator_url, "/api/v1/jobs"),
+                headers=_auth(settings.service_token),
+                json=job.model_dump(mode="json"),
+            )
+        )
+        run.view = JobView.model_validate_json(response.content)
+        await run.checkpoint()
+    view = run.view
+    if view.stage != "extract" or view.phase != "accepted":
+        await _advance(http, settings, run)
+        return
+    if run.extraction is None:
+        requirements = (
+            [item.model_dump(mode="json") for item in run.extraction_review.requirements]
+            if run.extraction_review is not None
+            else [_requirement(run)]
+        )
+        run.extraction = await _ask(
+            http, settings, run, view, "extraction", {"requirements": requirements}
+        )
+        await run.checkpoint()
+    if run.facts.offer_price < run.facts.quantity * run.facts.unit_cost:
+        run.view = await _solve(http, settings, run, view)
+        return
+    run.message("orchestrator", "risk", "SENT", "Оценка открытого фрагмента", None)
+    penalty = run.facts.penalty_daily_percent
+    if penalty is None:
+        penalty = confirmed_daily_penalty(run.extraction_review, run.context)
+    run.view = await _post_job(
+        http,
+        settings,
+        view,
+        "risk-input",
+        {
+            "execution_id": str(view.execution_id),
+            "risk": {
+                "kind": "risk_task.v1",
+                "task_id": str(uuid5(run.id, "risk")),
+                "job_id": str(run.id),
+                "fragment_id": str(uuid5(run.id, "contract")),
+                "source": _risk_source(run, run.context),
+                "fragment_text": run.context,
+                "fragment_type": "public_text",
+                "rules_version": settings.kb_version,
+                "penalty_daily_percent": decimal_text(penalty or Decimal(0)),
+                "penalty_daily_threshold_percent": decimal_text(
+                    settings.web_penalty_threshold_percent
+                ),
+                "prompt_version": "v1",
+                "trace_id": str(job.trace_id),
+            },
+        },
+    )
+    await _advance(http, settings, run)
+
+
+async def work_run(
+    settings: WorkbenchSettings, run: Run, decision: tuple[ReviewCard, DecisionInput] | None
+) -> None:
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.timeout_seconds, trust_env=False, follow_redirects=False
+        ) as http:
+            if run.save is not None and run.view is not None:
+                reply = _ok(
+                    await http.get(
+                        _url(settings.orchestrator_url, f"/api/v1/jobs/{run.id}"),
+                        headers=_auth(settings.service_token),
+                    )
+                )
+                run.view = JobView.model_validate_json(reply.content)
+            if decision is None:
+                await _start(http, settings, run)
+                return
+            card, body = decision
+            assert run.view is not None
+            run.view = await _post_job(
+                http,
+                settings,
+                run.view,
+                f"cards/{card.card_id}/decision",
+                {
+                    "decision_id": str(uuid5(card.card_id, "web-decision")),
+                    "decision": body.decision,
+                    "comment": body.comment,
+                    "supply_confirmation": body.supply_confirmation.model_dump(mode="json")
+                    if body.supply_confirmation is not None
+                    else None,
+                },
+                settings.reviewer_tokens[card.role],
+            )
+            run.message(
+                "operator",
+                "orchestrator",
+                body.decision,
+                card.question,
+                body.supply_confirmation.model_dump(mode="json")
+                if body.supply_confirmation is not None
+                else None,
+            )
+            await _advance(http, settings, run)
+    except Exception as error:
+        _LOG.warning("workbench run_id=%s failure=%s", run.id, type(error).__name__)
+        run.error = "Не удалось завершить этап. Проверьте документы и готовность сервисов."
+
+
+def new_run(run_id: UUID, incoming: RunInput, uploads: list[Upload], normalization: Upload) -> Run:
+    return Run(run_id, incoming.title, incoming.facts, incoming.context, uploads, normalization)

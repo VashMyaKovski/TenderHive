@@ -1,0 +1,102 @@
+@page "/"
+@page "/jobs"
+@inject IConfiguration Configuration
+@inject GatewayClient Gateway
+@inject SessionState Session
+@inject NavigationManager Navigation
+
+<h1>Задания</h1>
+
+@if (error is not null)
+{
+    <p class="error">@error</p>
+}
+
+<div class="toolbar">
+    <button class="primary" @onclick="LoadAsync" disabled="@busy">@(busy ? "Обновление…" : "Обновить")</button>
+    <span class="muted">Показано заданий: @jobs.Count</span>
+</div>
+
+@if (jobs.Count == 0 && error is null && !busy)
+{
+    <p class="muted">Заданий пока нет. Отправьте комплект документации в Telegram-бот или через API шлюза.</p>
+}
+else
+{
+    <table class="grid">
+        <thead>
+        <tr>
+            <th>Задание</th>
+            <th>Создано (UTC)</th>
+            <th>Источник</th>
+            <th>Статус</th>
+            <th>Версия БЗ</th>
+            <th>Маржа</th>
+            <th>Рекомендация</th>
+            <th></th>
+        </tr>
+        </thead>
+        <tbody>
+        @foreach (var job in jobs)
+        {
+            <tr>
+                <td class="mono">@Short(job.JobId)</td>
+                <td>@DisplayText.Utc(job.CreatedAt)</td>
+                <td>@DisplayText.Source(job.Source)</td>
+                <td><span class="@DisplayText.StatusClass(job.Status)">@DisplayText.Status(job.Status)</span></td>
+                <td class="mono">@job.KbVersion</td>
+                <td>@(job.MarginPercent is null ? "—" : $"{job.MarginPercent:0.#} %")</td>
+                <td>@(string.IsNullOrWhiteSpace(job.Recommendation) ? "—" : job.Recommendation)</td>
+                <td><a href="@($"jobs/{job.JobId}")">Открыть</a></td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}
+
+@code {
+    private List<JobDto> jobs = new();
+    private string? error;
+    private bool busy;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (Configuration.GetValue<bool>("DEMO_DASHBOARD_ENABLED"))
+        {
+            Navigation.NavigateTo("/demo", replace: true);
+            return;
+        }
+
+        if (!Session.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login");
+            return;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        busy = true;
+        error = null;
+        try
+        {
+            jobs = await Gateway.GetJobsAsync();
+        }
+        catch (GatewayException exception)
+        {
+            error = exception.Message;
+        }
+        catch (HttpRequestException)
+        {
+            error = "Шлюз недоступен: проверьте переменную GATEWAY_BASE_URL.";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private static string Short(Guid jobId) => jobId.ToString()[..8];
+}

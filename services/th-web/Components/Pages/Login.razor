@@ -1,0 +1,24 @@
+@page "/login"
+
+<h1>Вход в дашборд</h1>
+
+<form class="card narrow" @onsubmit="SignInAsync" @onsubmit:preventDefault>
+    <label for="username">Логин</label>
+    <input id="username" @bind="username" autocomplete="username" required />
+
+    <label for="password">Пароль</label>
+    <input id="password" type="password" @bind="password" autocomplete="current-password" required />
+
+    @if (error is not null)
+    {
+        <p class="error" role="alert">@error</p>
+    }
+
+    <button class="primary" type="submit" disabled="@busy">@(busy ? "Проверка…" : "Войти")</button>
+</form>
+
+<p class="muted">
+    Демонстрационные учётные записи: specialist (тендерный специалист), procurement (снабженец),
+    lawyer (юрист), head (руководитель подразделения), kbadmin (администратор базы знаний).
+    Пароль задаётся переменной <code>DEMO_PASSWORD</code>.
+</p>

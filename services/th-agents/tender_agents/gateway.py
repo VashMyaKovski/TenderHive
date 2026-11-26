@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Mapping
 from typing import Annotated, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from pydantic import Field, ValidationError
@@ -20,30 +20,41 @@ from contracts.risk_task_v1 import (
     Text,
 )
 
-type GatewayCode = Literal[
+type RequestError = Literal[
     "invalid_request",
     "invalid_context",
     "unsafe_context",
     "unsupported_prompt_version",
     "task_disabled",
-    "provider_rejected",
-    "provider_unavailable",
-    "provider_timeout",
-    "invalid_provider_response",
+    "storage_unavailable",
 ]
-_STATUS: Mapping[GatewayCode, int] = {
+type ProviderReason = Literal["timeout", "auth", "rate_limit", "schema_mismatch", "unavailable"]
+_STATUS: Mapping[RequestError, int] = {
     "invalid_request": 422,
     "invalid_context": 422,
     "unsafe_context": 422,
     "unsupported_prompt_version": 422,
     "task_disabled": 503,
-    "provider_rejected": 502,
-    "provider_unavailable": 503,
-    "provider_timeout": 504,
-    "invalid_provider_response": 502,
+    "storage_unavailable": 503,
+}
+_PROVIDER_FAILURES: Mapping[ProviderReason, tuple[int, FailureCode]] = {
+    "auth": (502, "provider_rejected"),
+    "rate_limit": (503, "provider_unavailable"),
+    "unavailable": (503, "provider_unavailable"),
+    "timeout": (504, "provider_timeout"),
+    "schema_mismatch": (502, "invalid_provider_response"),
 }
 _RETRYABLE = frozenset(
-    {"gateway_timeout", "gateway_transport_error", "provider_unavailable", "provider_timeout"}
+    {
+        "gateway_timeout",
+        "gateway_transport_error",
+        "gateway_storage_unavailable",
+        "provider_unavailable",
+        "provider_timeout",
+        "task_in_progress",
+        "task_store_unavailable",
+        "artifact_storage_unavailable",
+    }
 )
 
 
@@ -58,13 +69,16 @@ class GatewayFailure(Exception):
         return self.code in _RETRYABLE
 
 
-class GatewayTrace(Contract):
-    model_config = {"extra": "ignore", "hide_input_in_errors": True}
+class ErrorResponse(Contract):
+    code: RequestError
+    message: str
     trace_id: UUID
 
 
-class ErrorResponse(Contract):
-    code: GatewayCode
+class UnavailableResponse(Contract):
+    job_id: UUID
+    status: Literal["UNAVAILABLE"]
+    reason: ProviderReason
     trace_id: UUID
 
 
@@ -81,7 +95,7 @@ class Hypothesis(Contract):
 class RiskAnswer(Contract):
     kind: Literal["risk_assessment"]
     hypothesis: Hypothesis
-    source_ids: list[Annotated[int, Field(strict=True)]]
+    source_ids: Annotated[list[Annotated[int, Field(strict=True)]], Field(min_length=1)]
     rules_version: Identifier
     rule_id: Literal["R-RISK-04"]
     penalty_daily_percent: Percent
@@ -98,6 +112,7 @@ class InferenceResponse(Contract):
     model_version: Identifier
     prompt_version: Identifier
     masked: Literal[True]
+    cached: bool
     trace_id: UUID
 
 
@@ -107,6 +122,7 @@ class ModelGateway:
         self._timeout_seconds = timeout_seconds
 
     async def assess(self, task: RiskTaskV1, a2a_task_id: str) -> RiskResultV1:
+        trace_id = task.trace_id or uuid4()
         payload = {
             "job_id": str(task.job_id),
             "task": "risk_assessment",
@@ -121,39 +137,36 @@ class ModelGateway:
             ],
             "prompt_version": task.prompt_version,
             "mask": True,
+            "trace_id": str(trace_id),
         }
         try:
             async with asyncio.timeout(self._timeout_seconds):
-                response = await self._client.post("/api/v1/inference", json=payload)
+                response = await self._client.post(
+                    "/api/v1/invoke", json=payload, headers={"X-Trace-Id": str(trace_id)}
+                )
         except TimeoutError, httpx.TimeoutException:
-            raise GatewayFailure("gateway_timeout", None) from None
+            raise GatewayFailure("gateway_timeout", trace_id) from None
         except httpx.RequestError:
-            raise GatewayFailure("gateway_transport_error", None) from None
+            raise GatewayFailure("gateway_transport_error", trace_id) from None
 
         try:
             if response.status_code != 200:
-                error = ErrorResponse.model_validate_json(response.content)
-                if response.status_code == _STATUS[error.code]:
-                    raise GatewayFailure(error.code, error.trace_id)
-                raise GatewayFailure("invalid_gateway_response", error.trace_id)
+                raise self._failure(response, task.job_id, trace_id)
             result = InferenceResponse.model_validate_json(response.content)
         except ValidationError:
-            try:
-                trace_id = GatewayTrace.model_validate_json(response.content).trace_id
-            except ValidationError:
-                trace_id = None
             raise GatewayFailure("invalid_gateway_response", trace_id) from None
 
         answer = result.answer
         if (
             result.job_id != task.job_id
+            or result.trace_id != trace_id
             or result.prompt_version != task.prompt_version
             or answer.rules_version != task.rules_version
             or answer.penalty_daily_percent != task.penalty_daily_percent
             or answer.penalty_daily_threshold_percent != task.penalty_daily_threshold_percent
             or any(index != 1 for index in answer.source_ids)
         ):
-            raise GatewayFailure("invalid_gateway_response", result.trace_id)
+            raise GatewayFailure("invalid_gateway_response", trace_id)
         return RiskResultV1(
             kind="risk_result.v1",
             task_id=task.task_id,
@@ -167,7 +180,28 @@ class ModelGateway:
             summary=answer.hypothesis.summary,
             confidence=result.confidence,
             human_reason=answer.human_reason,
-            sources=[RiskSourceV1(fragment_id=task.fragment_id, source=task.source)]
-            if answer.source_ids
-            else [],
+            sources=[RiskSourceV1(fragment_id=task.fragment_id, source=task.source)],
         )
+
+    @staticmethod
+    def _failure(response: httpx.Response, job_id: UUID, trace_id: UUID) -> GatewayFailure:
+        try:
+            error = UnavailableResponse.model_validate_json(response.content)
+        except ValidationError:
+            problem = ErrorResponse.model_validate_json(response.content)
+            if response.status_code == _STATUS[problem.code] and problem.trace_id == trace_id:
+                code = (
+                    "gateway_storage_unavailable"
+                    if problem.code == "storage_unavailable"
+                    else problem.code
+                )
+                return GatewayFailure(code, trace_id)
+        else:
+            status, code = _PROVIDER_FAILURES[error.reason]
+            if (
+                response.status_code == status
+                and error.job_id == job_id
+                and error.trace_id == trace_id
+            ):
+                return GatewayFailure(code, trace_id)
+        return GatewayFailure("invalid_gateway_response", trace_id)

@@ -14,6 +14,7 @@ type Text = Annotated[
 type Percent = Annotated[Decimal, Field(ge=0, le=100, max_digits=10, decimal_places=6)]
 type Confidence = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False, strict=True)]
 type Category = Literal["personal", "organization", "banking", "registration", "commercial"]
+type ProviderReason = Literal["timeout", "auth", "rate_limit", "schema_mismatch", "unavailable"]
 
 
 class Contract(BaseModel):
@@ -64,6 +65,10 @@ class InferenceRequest(Contract):
     context: Annotated[list[ContextItem], Field(min_length=1, max_length=12)]
     prompt_version: Identifier
     mask: Literal[True]
+
+
+class InvokeRequest(InferenceRequest):
+    trace_id: UUID
 
 
 class ModelRisk(Contract):
@@ -122,4 +127,15 @@ class InferenceResponse(Contract):
     model_version: Identifier
     prompt_version: Identifier
     masked: Literal[True] = True
+    trace_id: UUID
+
+
+class InvokeResponse(InferenceResponse):
+    cached: bool
+
+
+class UnavailableResponse(Contract):
+    job_id: UUID
+    status: Literal["UNAVAILABLE"] = "UNAVAILABLE"
+    reason: ProviderReason
     trace_id: UUID

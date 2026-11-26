@@ -26,7 +26,24 @@ PROMPTS = MappingProxyType(
                 + 'Return {"text": string, "confidence": number} with observed text and layout. '
                 "Mark unreadable sections explicitly.",
             }
-        )
+        ),
+        "v3": MappingProxyType(
+            {
+                "risk_assessment": _ROLE
+                + 'Return {"summary": string, "risk_level": "low"|"medium"|"high", '
+                '"penalty_daily_percent": number|null, "confidence": number, "sources": [integer]}. '
+                "Cite only source_id values in the evidence. Keep numbers out of the summary. "
+                "Use 0.15 for 0.15 percent per day. Use null when the penalty is absent or "
+                "ambiguous, and lower confidence when evidence is incomplete.",
+                "document_draft": _ROLE
+                + 'Return {"text": string, "confidence": number} with a draft. '
+                "Keep redaction placeholders intact. Mark any other missing fields "
+                "and do not invent procurement figures.",
+                "vision": _ROLE
+                + 'Return {"text": string, "confidence": number} with observed text and layout. '
+                "Preserve redaction placeholders. Mark unreadable text without guessing.",
+            }
+        ),
     }
 )
 

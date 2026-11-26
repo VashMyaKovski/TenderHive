@@ -1,0 +1,433 @@
+@page "/demo"
+@page "/demo/{RunId:guid}"
+@implements IDisposable
+
+<PageTitle>Анализ закупок — TenderHive</PageTitle>
+
+@if (Configuration.GetValue<bool>("DEMO_DASHBOARD_ENABLED"))
+{
+    @if (RunId is null)
+    {
+        <header class="dashboard-heading">
+            <div>
+                <h1>Анализ закупок</h1>
+                <p class="muted">Загрузите документы и проверьте рекомендацию об участии.</p>
+            </div>
+        </header>
+
+        <div class="dashboard-columns">
+            @if (Session.IsAnyRole("tender_specialist", "procurement", "department_head"))
+            {
+                <section class="card dashboard-panel" aria-labelledby="new-run-heading">
+                    <h2 id="new-run-heading">Новый анализ</h2>
+                    <form @onsubmit="StartAsync" @onsubmit:preventDefault>
+                        <div class="demo-file">
+                            <label for="demo-documents">Документы и сканы</label>
+                            <InputFile id="demo-documents" OnChange="ReadFilesAsync" multiple accept=".pdf,.docx,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp" aria-describedby="file-limits" disabled="@(busy || readingFiles)" />
+                            <p id="file-limits" class="muted hint">До 5 файлов, до 2 МБ каждый и до 5 МБ суммарно.</p>
+                            @if (readingFiles)
+                            {
+                                <p role="status">Читаем файлы…</p>
+                            }
+                            @if (files.Count > 0)
+                            {
+                                <ul class="selected-files" aria-label="Выбранные файлы">
+                                    @foreach (var file in files)
+                                    {
+                                        <li>@file.Name</li>
+                                    }
+                                </ul>
+                            }
+                        </div>
+
+                        <label for="demo-title">Название закупки</label>
+                        <input id="demo-title" maxlength="180" @bind="title" required />
+
+                        @if (manualSample)
+                        {
+                            @LotDetails
+                        }
+                        @if (formError is not null)
+                        {
+                            <p class="error" role="alert">@formError</p>
+                        }
+                        <div class="dashboard-actions">
+                            <button class="primary" type="submit" disabled="@(busy || readingFiles)">@(busy ? "Запускаем…" : (manualSample ? "Запустить анализ" : "Обработать документы"))</button>
+                            @if (files.Count == 0 || manualSample)
+                            {
+                                <button class="secondary" type="button" @onclick="FillSample" disabled="@(busy || readingFiles)">Заполнить пример</button>
+                            }
+                        </div>
+                    </form>
+                </section>
+            }
+
+            <section class="card dashboard-panel" aria-labelledby="runs-heading">
+                <div class="section-heading">
+                    <h2 id="runs-heading">Прогоны</h2>
+                    <button class="secondary" type="button" @onclick="ReloadAsync" disabled="@refreshing">Обновить</button>
+                </div>
+                @if (loadError is not null)
+                {
+                    <p class="error" role="alert">@loadError</p>
+                }
+                else if (refreshing && runs.Count == 0)
+                {
+                    <p class="muted" role="status">Загрузка прогонов…</p>
+                }
+                else if (runs.Count == 0)
+                {
+                    <p class="muted">Нет доступных прогонов.</p>
+                }
+                else
+                {
+                    <ul class="run-list">
+                        @foreach (var item in runs)
+                        {
+                            <li @key="item.Id">
+                                <a href="@($"/demo/{item.Id}")">
+                                    <strong>@item.Title</strong>
+                                    <span class="muted mono">@item.Id.ToString()[..8]</span>
+                                </a>
+                                <span class="@StatusClass(item.Status)">@StatusLabel(item.Status, item.Phase)</span>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+        </div>
+    }
+    else
+    {
+        <div class="dashboard-heading">
+            <div>
+                <a href="/demo">← К прогонам</a>
+                <h1>@(run?.Title ?? "Детали прогона")</h1>
+            </div>
+            @if (run is not null)
+            {
+                <span role="status" class="@StatusClass(run.Status)">@StatusLabel(run.Status, run.Phase)</span>
+            }
+        </div>
+
+        @if (loadError is not null)
+        {
+            <p class="error" role="alert">@loadError</p>
+        }
+        @if (gone)
+        {
+            <a href="/demo">К списку прогонов</a>
+        }
+        else if (run is { } active)
+        {
+            <div class="demo-meta mono">
+                <span>Job ID @active.Id</span>
+                @if (active.TraceId is { } traceId)
+                {
+                    <span>Trace ID @traceId</span>
+                }
+            </div>
+            @if (active.Documents.Count > 0)
+            {
+                <p class="muted demo-documents">Документы: @string.Join(", ", active.Documents.Select(document => document.Name))</p>
+            }
+            @if (active.Error is not null)
+            {
+                <p class="error" role="alert">@active.Error</p>
+            }
+
+            <div class="dashboard-columns detail-columns">
+                <div>
+                    @if (actionError is not null)
+                    {
+                        <p class="error" role="alert">@actionError</p>
+                    }
+                    @if (active.Extraction is { } extraction)
+                    {
+                        <section class="card dashboard-panel" aria-labelledby="extraction-heading">
+                            <h2 id="extraction-heading">Требования из документов</h2>
+                            <p role="status">@ExtractionStatusLabel(extraction.Status)</p>
+                            @if (extraction.Warnings.Count > 0)
+                            {
+                                <ul class="reason-list">
+                                    @foreach (var warning in extraction.Warnings)
+                                    {
+                                        <li>@warning</li>
+                                    }
+                                </ul>
+                            }
+                            @if (active is { Phase: "awaiting_extraction_confirmation", CanReviewExtraction: true })
+                            {
+                                <form @onsubmit="ConfirmExtractionAsync" @onsubmit:preventDefault>
+                                    @foreach (var draft in requirementDrafts)
+                                    {
+                                        var item = draft.Original;
+                                        var fieldId = $"requirement-{item.RequirementId:D}";
+                                        <fieldset @key="item.RequirementId">
+                                            <legend>@RequirementKindLabel(item.Kind)</legend>
+                                            <p class="muted">
+                                                @DocumentLabel(active, item.Source.FileId), стр. @item.Source.Page
+                                                @if (item.NeedsReview)
+                                                {
+                                                    <span class="badge warn">Нужно проверить</span>
+                                                }
+                                            </p>
+                                            <label for="@fieldId">Текст требования</label>
+                                            <textarea id="@fieldId" rows="2" maxlength="12000" @bind="draft.Text" required></textarea>
+                                            <label for="@($"{fieldId}-value")">Значение @item.Unit</label>
+                                            <input id="@($"{fieldId}-value")" @bind="draft.Value" />
+                                            <button class="secondary" type="button" @onclick="() => UseRiskContext(draft.Text)">Взять фрагмент для оценки риска</button>
+                                            <details>
+                                                <summary>Источник</summary>
+                                                <p>@item.Text</p>
+                                                <p class="muted">Координаты @string.Join(", ", item.Source.Bbox)</p>
+                                            </details>
+                                        </fieldset>
+                                    }
+                                    <h3>Параметры закупки и данные компании</h3>
+                                    @LotDetails
+                                    <div class="dashboard-actions">
+                                        <button class="primary" type="submit" disabled="@(busy || active.IsRunning)">Подтвердить данные и продолжить</button>
+                                    </div>
+                                </form>
+                            }
+                            else if (extraction.Requirements.Count > 0)
+                            {
+                                <ul class="reason-list">
+                                    @foreach (var item in extraction.Requirements)
+                                    {
+                                        <li @key="item.RequirementId">
+                                            <strong>@RequirementKindLabel(item.Kind)</strong>
+                                            <p>@item.Text</p>
+                                            @if (RequirementValue(item.Value) is { Length: > 0 } value)
+                                            {
+                                                <p>@value @item.Unit</p>
+                                            }
+                                            <p class="muted">@DocumentLabel(active, item.Source.FileId), стр. @item.Source.Page</p>
+                                        </li>
+                                    }
+                                </ul>
+                            }
+
+                            @if (active is { Phase: "extraction_failed", CanReviewExtraction: true })
+                            {
+                                <button class="secondary" type="button" @onclick="RetryExtractionAsync"
+                                        disabled="@(busy || active.IsRunning)">Повторить обработку документов</button>
+                            }
+                        </section>
+                    }
+                    @if (active.Card is { } card)
+                    {
+                        <section class="card dashboard-panel review-card" aria-labelledby="decision-heading">
+                            <h2 id="decision-heading">Требуется согласование</h2>
+                            <p>@card.Question</p>
+                            <p class="muted">Ответственный: @ReviewerLabel(card.Role)</p>
+                            @if (card.Supply is { } supply)
+                            {
+                                <p>Не хватает @supply.Shortage ед.</p>
+                                @if (supply.DeliveryDeadline is { } deadline)
+                                {
+                                    <p>Крайняя дата поставки <time datetime="@deadline.ToString("O")">@DateLabel(deadline)</time>.</p>
+                                }
+                                else
+                                {
+                                    <p>Чтобы согласовать дозаказ, укажите крайний срок поставки в новом прогоне.</p>
+                                }
+                            }
+                            @if (card.CanDecide)
+                            {
+                                @if (card.Supply?.DeliveryDeadline is not null)
+                                {
+                                    <div class="row demo-facts" role="group" aria-label="Подтверждённая поставка">
+                                        <div>
+                                            <label for="decision-supply-quantity">Подтверждённое количество</label>
+                                            <input id="decision-supply-quantity" name="supply-quantity" autocomplete="off"
+                                                   type="number" inputmode="decimal" min="0" step="any" @bind="confirmedQuantity" />
+                                        </div>
+                                        <div>
+                                            <label for="decision-supply-date">Дата поставки</label>
+                                            <input id="decision-supply-date" name="supply-date" autocomplete="off"
+                                                   type="date" @bind="confirmedDeliveryDate" />
+                                        </div>
+                                        <div>
+                                            <label for="decision-supply-cost">Дополнительные затраты, BYN</label>
+                                            <input id="decision-supply-cost" name="supply-cost" autocomplete="off"
+                                                   type="number" inputmode="decimal" min="0" step="any" @bind="additionalCost" />
+                                        </div>
+                                    </div>
+                                }
+                                <label for="decision-comment">Комментарий</label>
+                                <textarea id="decision-comment" name="comment" autocomplete="off"
+                                          rows="2" maxlength="1000" @bind="comment"
+                                          @bind:event="oninput" required="@card.RequiresComment"></textarea>
+                                <div class="dashboard-actions">
+                                    <button class="primary" type="button" disabled="@(busy || card.Supply is { DeliveryDeadline: null })"
+                                            @onclick='() => DecideAsync(card.Id, "APPROVED")'>@(card.Supply is null ? "Согласовать" : "Подтвердить поставку")</button>
+                                    <button class="danger" type="button" disabled="@busy" @onclick='() => DecideAsync(card.Id, "REJECTED")'>Отклонить</button>
+                                </div>
+                            }
+                            else
+                            {
+                                <p class="muted">Решение принимает аккаунт назначенной роли.</p>
+                            }
+                        </section>
+                    }
+
+                    <section class="card dashboard-panel" aria-labelledby="recommendation-heading">
+                        <h2 id="recommendation-heading">Рекомендация</h2>
+                        @if (active.Recommendation is { } recommendation)
+                        {
+                            <p class="recommendation-value">@RecommendationLabel(recommendation.Value)</p>
+                            <ul class="reason-list">
+                                @foreach (var reason in recommendation.Reasons)
+                                {
+                                    <li>@reason</li>
+                                }
+                            </ul>
+                            @if (recommendation.Conditions.Count > 0)
+                            {
+                                <h3>Условия</h3>
+                                <ul class="reason-list">
+                                    @foreach (var condition in recommendation.Conditions)
+                                    {
+                                        <li>@ConditionLabel(condition)</li>
+                                    }
+                                </ul>
+                            }
+                        }
+                        else
+                        {
+                            <p class="muted">Рекомендация пока не сформирована.</p>
+                        }
+                        @if (active.RiskDecisions is { Count: > 0 } reviews)
+                        {
+                            <h3>Решения по договорному риску</h3>
+                            <ul class="reason-list">
+                                @foreach (var review in reviews)
+                                {
+                                    <li>
+                                        <strong>@ReviewerLabel(review.Role) · @MessageLabel(review.Decision)</strong>
+                                        <div>@ConditionLabel(review.Reason)</div>
+                                        @if (review.Comment.Length > 0)
+                                        {
+                                            <div>@review.Comment</div>
+                                        }
+                                    </li>
+                                }
+                            </ul>
+                        }
+                    </section>
+
+                    <section class="card dashboard-panel" aria-labelledby="files-heading">
+                        <h2 id="files-heading">Файлы</h2>
+                        @if (active.Artifacts.Count == 0)
+                        {
+                            <p class="muted">@(active.Phase == "done"
+                                ? "Комплект доступен автору прогона."
+                                : "Комплект появится после итогового согласования.")</p>
+                        }
+                        else
+                        {
+                            <ul class="artifact-list">
+                                @foreach (var artifact in active.Artifacts)
+                                {
+                                    <li @key="artifact.Name">
+                                        <button class="secondary" type="button" disabled="@busy" @onclick="() => DownloadAsync(active.Id, artifact.Name)">Скачать @artifact.Name</button>
+                                    </li>
+                                }
+                            </ul>
+                        }
+                    </section>
+
+                </div>
+
+                <section class="card dashboard-panel" aria-labelledby="timeline-heading">
+                    <h2 id="timeline-heading">Работа агентов</h2>
+                    @if (active.Messages.Count == 0)
+                    {
+                        <p class="muted">Записи появятся после начала обработки.</p>
+                    }
+                    else
+                    {
+                        <ol class="demo-timeline">
+                            @foreach (var message in active.Messages)
+                            {
+                                <li @key="message.Id">
+                                    <div class="message-heading">
+                                        <strong>@AgentLabel(message.Agent) → @AgentLabel(message.To)</strong>
+                                        <time class="muted" datetime="@message.At.ToString("O")">@message.At.ToLocalTime().ToString("HH:mm:ss")</time>
+                                    </div>
+                                    <span class="badge">@MessageLabel(message.Status)</span>
+                                    <p>@message.Text</p>
+                                    @if (message.Details is { ValueKind: not System.Text.Json.JsonValueKind.Null and not System.Text.Json.JsonValueKind.Undefined } details)
+                                    {
+                                        <details>
+                                            <summary>Данные обмена</summary>
+                                            <pre>@PrettyJson(details)</pre>
+                                        </details>
+                                    }
+                                </li>
+                            }
+                        </ol>
+                    }
+                </section>
+            </div>
+        }
+        else if (loadError is null)
+        {
+            <p class="muted" role="status">Загрузка прогона…</p>
+        }
+        else
+        {
+            <button class="secondary" type="button" @onclick="ReloadAsync" disabled="@refreshing">Повторить запрос</button>
+        }
+    }
+}
+else
+{
+    <h1>Анализ закупок</h1>
+    <p>Демонстрационный профиль отключён.</p>
+    <a href="/">К заданиям</a>
+}
+
+@code {
+    private RenderFragment LotDetails => @<div>
+        <div class="row demo-facts">
+            <div>
+                <label for="demo-quantity">Требуемое количество</label>
+                <input id="demo-quantity" type="number" min="0" step="any" @bind="quantity" required />
+            </div>
+            <div>
+                <label for="demo-available">Доступное количество</label>
+                <input id="demo-available" type="number" min="0" step="any" @bind="available" required />
+            </div>
+            <div>
+                <label for="demo-delivery-deadline">Крайняя дата поставки</label>
+                <input id="demo-delivery-deadline" name="delivery-deadline" type="date"
+                       autocomplete="off" @bind="deliveryDeadline"
+                       required="@(available < quantity)" aria-describedby="demo-delivery-hint" />
+                <p id="demo-delivery-hint" class="muted hint">Нужна, если требуется дозаказ.</p>
+            </div>
+            <div>
+                <label for="demo-validity">Срок действия предложения, рабочих дней</label>
+                <input id="demo-validity" type="number" min="0" max="3650" @bind="validity" required />
+            </div>
+            <div>
+                <label for="demo-unit-cost">Себестоимость единицы</label>
+                <input id="demo-unit-cost" type="number" min="0" step="any" @bind="unitCost" required />
+            </div>
+            <div>
+                <label for="demo-offer-price">Цена предложения</label>
+                <input id="demo-offer-price" type="number" min="0" step="any" @bind="offerPrice" required />
+            </div>
+            <div>
+                <label for="demo-penalty">Неустойка в день, %</label>
+                <input id="demo-penalty" type="number" min="0" max="100" step="any" @bind="penalty" />
+            </div>
+        </div>
+
+        <label for="demo-context">Фрагмент условий для оценки риска</label>
+        <textarea id="demo-context" rows="3" maxlength="2000" @bind="context" required aria-describedby="demo-context-hint"></textarea>
+        <p id="demo-context-hint" class="muted hint">Используйте общедоступный фрагмент без конфиденциальных данных.</p>
+    </div>;
+}

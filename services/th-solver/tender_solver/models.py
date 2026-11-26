@@ -1,144 +1,84 @@
+from datetime import date
+from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
+from contracts.agent_task import AgentResult, PositiveQuantity, Quantity
+from contracts.models import Contract, NonEmpty, Requirement, UtcDatetime
+from pydantic import Field, JsonValue, model_validator
 
-Identifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,199}$")]
-Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=12_000)]
-
-
-class Contract(BaseModel):
-    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+type Scalar = str | int | float | bool | None
+type Number = Annotated[Decimal, Field(allow_inf_nan=False)]
 
 
-class Requirement(Contract):
-    requirement_id: UUID
-    text: Text
-    kind: Literal["penalty", "deadline", "security", "qualification", "resource", "other"]
-    value: str | None = None
-    mandatory: bool
-    confidence: Annotated[float, Field(ge=0, le=1)]
-    source_ref: Text
+class Fact(Contract):
+    fact_id: UUID
+    key: NonEmpty
+    value: Scalar
+    source: NonEmpty
 
 
-class FactInput(Contract):
-    key: Identifier
+class KnowledgeFact(Contract):
+    fact_id: NonEmpty
+    key: NonEmpty | None = None
     value: JsonValue
-    subject: Identifier | None = None
-    unit: str | None = None
+    source: NonEmpty
+    valid_from: date | None = None
+    valid_until: date | None = None
+    value_type: str | None = None
+
+
+class SupplyConfirmation(Contract):
+    quantity: PositiveQuantity
+    delivery_date: date
+    additional_cost: Quantity
+
+
+class Position(Contract):
+    position_id: NonEmpty
+    description: NonEmpty
+    quantity: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
+    available: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
+    unit_cost: Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
+    offer_unit_price: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
+    offer_total_price: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)] | None = None
+    supply_deadline: UtcDatetime | None = None
+    supply_confirmation: SupplyConfirmation | None = None
+    alternatives: list[JsonValue]
+
+
+class Profile(Contract):
+    regime: NonEmpty
+    task_class: NonEmpty
+    positions: list[Position]
 
 
 class SolveRequest(Contract):
     job_id: UUID
-    kb_version: Identifier
-    requirements: list[Requirement]
-    facts: list[FactInput]
-    profile: dict[str, JsonValue]
-    lot_ids: list[Identifier] = Field(default_factory=list)
+    kb_version: NonEmpty
+    requirements: Annotated[list[Requirement], Field(max_length=500)]
+    facts: Annotated[list[Fact], Field(max_length=2000)]
+    profile: Profile
+    lot_ids: list[NonEmpty]
     trace_id: UUID
-    regime: Identifier | None = None
-    task_class: Identifier | None = None
+    as_of: date | None = None
+    agent_results: list[AgentResult] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def verify_agent_jobs(self) -> SolveRequest:
+        if any(result.job_id != self.job_id for result in self.agent_results):
+            raise ValueError("Agent result belongs to a different job")
+        if len({result.task_id for result in self.agent_results}) != len(self.agent_results):
+            raise ValueError("Duplicate agent result")
+        return self
 
 
-class Rule(Contract):
-    rule_id: Identifier
-    condition: Text
-    consequence: Text
-    priority: Annotated[int, Field(ge=0, le=1000)]
-    scope: Identifier
-    version: Annotated[int, Field(ge=1)]
+class Condition(Contract):
+    field: NonEmpty
+    op: Literal["eq", "ne", "gt", "gte", "lt", "lte"]
+    value: Scalar
 
 
-class KnowledgeContext(Contract):
-    version: Identifier
-    rules: list[Rule]
-    facts: list[FactInput]
-    reference_data: dict[str, JsonValue]
-    graph_slice: dict[str, JsonValue]
-    corpus_fragments: list[JsonValue]
-
-
-class Compliance(Contract):
-    requirement_id: UUID
+class Consequence(Contract):
     status: Literal["MET", "NOT_MET", "NEEDS_REVIEW"]
-    rule_id: Identifier | None
-    reason: Text
-    source_ref: Text
-
-
-class ResourceCheck(Contract):
-    position_id: Identifier
-    covered: bool
-    shortage: str | None = None
-    supply_deadline: str | None = None
-
-
-class Estimate(Contract):
-    total_cost: str
-    offer_price: str
-    margin_percent: str
-    threshold: str
-    threshold_source: Identifier
-
-
-class Risk(Contract):
-    risk_id: Identifier
-    category: Literal["penalty", "quality", "delivery", "other"]
-    level: Literal["low", "medium", "high"]
-    basis: Text
-    mitigation: Text
-    source_ref: Text
-
-
-class Plan(Contract):
-    steps: list[Text]
-    deadlines: list[Text]
-    owners: list[Identifier]
-
-
-class ExplanationStep(Contract):
-    step: Text
-    rule_id: Identifier | None
-    version: Identifier
-    source_ref: Text | None = None
-
-
-class Explanation(Contract):
-    steps: list[ExplanationStep]
-    rule_trace: list[Identifier]
-    source_refs: list[Text]
-
-
-class ArtifactDescription(Contract):
-    artifact_id: Identifier
-    kind: Literal["DOCX", "PDF", "XLSX"]
-    version: Identifier
-    description: Text
-
-
-class StopReason(Contract):
-    code: Literal[
-        "PENALTY_ABOVE_THRESHOLD",
-        "LOW_MARGIN",
-        "RESOURCE_GAP",
-        "UNCLEAR_REQUIREMENTS",
-        "NO_SOLUTION",
-        "INCOMPATIBLE_RULES",
-    ]
-    reason: Text
-
-
-class SolverResult(Contract):
-    job_id: UUID
-    kb_version: Identifier
-    status: Literal["READY", "INCOMPLETE", "NO_SOLUTION"]
-    requirements: list[Requirement]
-    compliance: list[Compliance]
-    resources: list[ResourceCheck]
-    estimate: Estimate
-    risks: list[Risk]
-    recommendation: Literal["PARTICIPATE", "NOT_PARTICIPATE", "PARTICIPATE_WITH_CONDITIONS"]
-    plan: Plan
-    explanation: Explanation
-    artifacts: list[ArtifactDescription]
-    stop_reasons: list[StopReason]
+    reason: NonEmpty

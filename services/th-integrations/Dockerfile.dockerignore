@@ -1,0 +1,14 @@
+**
+!contracts/
+!contracts/__init__.py
+!contracts/models.py
+!services/
+!services/th-integrations/
+!services/th-integrations/pyproject.toml
+!services/th-integrations/uv.lock
+!services/th-integrations/tender_integrations/
+!services/th-integrations/tender_integrations/**/*.py
+!services/th-integrations/tender_integrations/migrations/
+!services/th-integrations/tender_integrations/migrations/*.sql
+!services/th-integrations/tests/
+!services/th-integrations/tests/*.py

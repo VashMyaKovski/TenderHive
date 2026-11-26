@@ -14,14 +14,7 @@ type Text = Annotated[
 type Confidence = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False, strict=True)]
 type Percent = Annotated[Decimal, Field(ge=0, le=100, max_digits=10, decimal_places=6)]
 type RiskLevel = Literal["low", "medium", "high"]
-type HumanReason = Literal[
-    "penalty_above_threshold",
-    "unclear_requirements",
-    "low_margin",
-    "resource_gap",
-    "no_solution",
-    "final_approval",
-]
+type HumanReason = Literal["penalty_above_threshold", "unclear_requirements"]
 type FailureCode = Literal[
     "invalid_request",
     "invalid_context",
@@ -35,6 +28,15 @@ type FailureCode = Literal[
     "invalid_gateway_response",
     "gateway_timeout",
     "gateway_transport_error",
+    "gateway_storage_unavailable",
+    "task_id_conflict",
+    "task_in_progress",
+    "task_store_unavailable",
+    "role_unavailable",
+    "document_unauthorized",
+    "approval_required",
+    "artifact_storage_unavailable",
+    "artifact_generation_failed",
 ]
 
 _DECIMAL = r"^(?:(?:0|[1-9][0-9]?)(?:\.[0-9]{1,6})?|100(?:\.0{1,6})?)$"
@@ -61,18 +63,22 @@ class SourceReference(Contract):
     locator: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
 
-class RiskTaskV1(Contract):
-    kind: Literal["risk_task.v1"]
-    task_id: UUID
-    job_id: UUID
+class RiskInput(Contract):
     fragment_id: UUID
     source: SourceReference
     fragment_text: Text
     fragment_type: Literal["synthetic_text", "public_text"]
-    rules_version: Identifier
     penalty_daily_percent: WirePercent
     penalty_daily_threshold_percent: WirePercent
     prompt_version: Identifier
+
+
+class RiskTaskV1(RiskInput):
+    kind: Literal["risk_task.v1"]
+    task_id: UUID
+    job_id: UUID
+    rules_version: Identifier
+    trace_id: UUID | None = None
 
 
 class RiskSourceV1(Contract):

@@ -1,0 +1,136 @@
+@page "/decisions"
+@inject GatewayClient Gateway
+@inject SessionState Session
+@inject NavigationManager Navigation
+
+<h1>Согласования</h1>
+
+<p class="notice">
+    Обязательная остановка не обходится через интерфейс: кнопки фиксируют только «согласовать» или «отклонить».
+    Решение сохраняется как неизменяемая запись, повторное решение по карточке отклоняется,
+    по истечении срока карточка переходит в состояние «Таймаут» и передаётся руководителю подразделения.
+</p>
+
+@if (error is not null)
+{
+    <p class="error">@error</p>
+}
+@if (message is not null)
+{
+    <p class="success">@message</p>
+}
+
+<div class="toolbar">
+    <button class="primary" @onclick="LoadAsync" disabled="@busy">@(busy ? "Обновление…" : "Обновить")</button>
+    <span class="muted">Открытых карточек: @cards.Count</span>
+</div>
+
+@if (cards.Count == 0 && error is null && !busy)
+{
+    <p class="muted">Открытых карточек нет.</p>
+}
+else
+{
+    @foreach (var card in cards)
+    {
+        <section class="card">
+            <div class="row">
+                <div><span class="muted">Основание</span><div><strong>@DisplayText.Reason(card.ReasonCode)</strong></div></div>
+                <div><span class="muted">Роль владельца</span><div>@DisplayText.Role(card.Role)</div></div>
+                <div><span class="muted">Срок</span><div>@DisplayText.Utc(card.Deadline) UTC</div></div>
+                <div><span class="muted">Осталось</span><div>@DisplayText.Remaining(card.Deadline)</div></div>
+                <div><span class="muted">Задание</span><div><a class="mono" href="@($"jobs/{card.JobId}")">@card.JobId.ToString()[..8]</a></div></div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(card.Comment))
+            {
+                <p class="muted">Причина остановки: @card.Comment</p>
+            }
+
+            <label>Комментарий к решению</label>
+            <input @bind="comments[card.DecisionId]" placeholder="Обоснование решения" />
+
+            @if (CanDecide(card))
+            {
+                <div class="toolbar">
+                    <button class="primary" @onclick="() => DecideAsync(card, DecisionValue.Approve)" disabled="@busy">Согласовать</button>
+                    <button class="danger" @onclick="() => DecideAsync(card, DecisionValue.Reject)" disabled="@busy">Отклонить</button>
+                </div>
+            }
+            else
+            {
+                <p class="muted">Решение принимает роль «@DisplayText.Role(card.Role)» или руководитель подразделения.</p>
+            }
+        </section>
+    }
+}
+
+@code {
+    private List<HumanDecisionDto> cards = new();
+    private readonly Dictionary<Guid, string?> comments = new();
+    private string? error;
+    private string? message;
+    private bool busy;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Session.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login");
+            return;
+        }
+
+        await LoadAsync();
+    }
+
+    private bool CanDecide(HumanDecisionDto card) =>
+        Session.IsAnyRole(card.Role, AppRole.DepartmentHead);
+
+    private async Task LoadAsync()
+    {
+        busy = true;
+        error = null;
+        try
+        {
+            cards = await Gateway.GetOpenDecisionsAsync();
+        }
+        catch (GatewayException exception)
+        {
+            error = exception.Message;
+        }
+        catch (HttpRequestException)
+        {
+            error = "Шлюз недоступен: проверьте переменную GATEWAY_BASE_URL.";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DecideAsync(HumanDecisionDto card, string decision)
+    {
+        busy = true;
+        error = null;
+        message = null;
+        try
+        {
+            comments.TryGetValue(card.DecisionId, out var comment);
+            var result = await Gateway.DecideAsync(card.DecisionId, decision, comment);
+            message = $"Решение «{DisplayText.Decision(result.Decision.Decision)}» зафиксировано. Статус задания: {DisplayText.Status(result.JobStatus)}.";
+            await LoadAsync();
+        }
+        catch (GatewayException exception)
+        {
+            error = exception.Message;
+        }
+        catch (HttpRequestException)
+        {
+            error = "Шлюз недоступен: проверьте переменную GATEWAY_BASE_URL.";
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+}
