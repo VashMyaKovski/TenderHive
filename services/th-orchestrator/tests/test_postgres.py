@@ -589,7 +589,7 @@ async def test_legacy_review_sequence_escalates_each_card_without_reassessing_ri
             assert original.card_id == card.card_id and original.state == "timed_out"
             assert replacement.reason_code == reason and replacement.timeout
             assert replacement.state == "open" and replacement.role == "DIVISION_HEAD"
-            response: dict[str, object] = decision_payload()
+            response: dict[str, object] = {**decision_payload()}
             if reason == "RESOURCE_GAP":
                 response["supply_confirmation"] = {
                     "quantity": "400",

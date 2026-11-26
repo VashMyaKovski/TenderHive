@@ -32,10 +32,6 @@ ALTER TABLE review_cards DROP CONSTRAINT review_cards_state_check;
 ALTER TABLE review_cards DROP CONSTRAINT review_cards_job_id_step_key;
 ALTER TABLE review_cards DROP CONSTRAINT review_cards_timeout_check;
 ALTER TABLE review_cards DROP CONSTRAINT review_cards_decision_check;
-ALTER TABLE review_cards ADD CONSTRAINT review_cards_reason_code_check CHECK (reason_code IN (
-    'penalty_above_threshold', 'unclear_requirements', 'PENALTY_ABOVE_THRESHOLD', 'LOW_MARGIN',
-    'RESOURCE_GAP', 'UNCLEAR_REQUIREMENTS', 'NO_SOLUTION', 'FINAL_APPROVAL'
-));
 ALTER TABLE review_cards ADD CONSTRAINT review_cards_role_check CHECK (role IN (
     'юрист', 'руководитель подразделения', 'служба снабжения', 'тендерный специалист',
     'LAWYER', 'DIVISION_HEAD', 'SUPPLY', 'TENDER_SPECIALIST', 'ADMINISTRATOR'
@@ -124,6 +120,10 @@ UPDATE review_cards SET decided_role = role WHERE state = 'decided';
 ALTER TABLE review_cards ADD CONSTRAINT review_cards_step_check CHECK (
     step IN ('risk_review', 'risk_escalation', 'review', 'review_escalation')
 );
+ALTER TABLE review_cards ADD CONSTRAINT review_cards_reason_code_check CHECK (reason_code IN (
+    'penalty_above_threshold', 'unclear_requirements', 'PENALTY_ABOVE_THRESHOLD', 'LOW_MARGIN',
+    'RESOURCE_GAP', 'UNCLEAR_REQUIREMENTS', 'NO_SOLUTION', 'FINAL_APPROVAL'
+));
 ALTER TABLE review_cards ADD UNIQUE (job_id, step, review_round, reason_code);
 ALTER TABLE review_cards ADD CONSTRAINT escalation_card_open_or_decided CHECK (
     step NOT IN ('risk_escalation', 'review_escalation') OR state <> 'timed_out'
