@@ -105,6 +105,12 @@ public sealed class GatewayClient
     public Task<DemoRunDto> DecideDemoRunAsync(Guid id, DemoDecisionInput input, CancellationToken ct) =>
         SendAsync<DemoRunDto>(HttpMethod.Post, $"api/demo/runs/{id}/decision", input, ct);
 
+    public Task<DemoRunDto> ConfirmDemoExtractionAsync(Guid id, DemoExtractionConfirmation input, CancellationToken ct) =>
+        SendAsync<DemoRunDto>(HttpMethod.Post, $"api/demo/runs/{id}/extraction/confirm", input, ct);
+
+    public Task<DemoRunDto> RetryDemoExtractionAsync(Guid id, CancellationToken ct) =>
+        SendAsync<DemoRunDto>(HttpMethod.Post, $"api/demo/runs/{id}/extraction/retry", new { }, ct);
+
     public async Task<(byte[] Bytes, string ContentType)> DownloadDemoArtifactAsync(
         Guid id, string name, CancellationToken ct)
     {

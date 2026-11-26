@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 from contracts.agent_task import AgentResult
+from contracts.docintel_v1 import ExtractedRequirement
 from contracts.models import Estimate, Recommendation
 from pydantic import JsonValue
 
@@ -69,6 +70,57 @@ RULE = {
     "condition": {"field": "experience", "op": "gte", "value": 5},
     "consequence": {"status": "MET", "reason": "Experience confirmed"},
 }
+
+
+@pytest.mark.parametrize(
+    ("text", "unit", "value", "expected"),
+    [
+        ("Срок действия предложения не менее 120 рабочих дней", "business_days", "120", "NOT_MET"),
+        ("Срок действия предложения не менее 90 рабочих дней", "business_days", "90", "MET"),
+        ("Срок поставки не менее 90 рабочих дней", "business_days", "90", "NEEDS_REVIEW"),
+        (
+            "Срок действия предложения не менее 90 календарных дней",
+            "calendar_days",
+            "90",
+            "NEEDS_REVIEW",
+        ),
+        ("Дата окончания подачи 14.10.2026", "date", "2026-10-14", "NEEDS_REVIEW"),
+    ],
+)
+def test_extracted_deadline_matches_only_its_own_facts(
+    request_data: SolveRequest, text: str, unit: str, value: str, expected: str
+) -> None:
+    payload = request_data.model_dump(mode="json")
+    source = request_data.requirements[0].source.model_dump(mode="json")
+    requirement = ExtractedRequirement.model_validate(
+        {
+            "requirement_id": uuid4(),
+            "text": text,
+            "kind": "deadline",
+            "mandatory": True,
+            "value": value,
+            "unit": unit,
+            "source": source,
+            "confidence": 1,
+            "needs_review": False,
+            "template_set_version": "ts-2026-11-1",
+        }
+    )
+    payload["requirements"] = [requirement.model_dump(mode="json")]
+    payload["facts"] = [
+        {"fact_id": str(uuid4()), "key": "offer_validity_workdays", "value": 90, "source": "offer"}
+    ]
+    rule = {
+        **RULE,
+        "rule_id": "R-DEMO-OFFER-VALIDITY",
+        "scope": {"kind": "deadline"},
+        "condition": {"field": "offer_validity_workdays", "op": "gte", "value": 60},
+    }
+
+    result = solve(SolveRequest.model_validate(payload), {"rules": [rule]}, Decimal(10))
+
+    assert result.compliance[0].status == expected
+    assert result.requirements[0].source.model_dump(mode="json") == source
 
 
 def test_ready_with_threshold_equality(request_data: SolveRequest) -> None:

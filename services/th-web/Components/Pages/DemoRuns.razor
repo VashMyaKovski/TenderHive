@@ -22,8 +22,8 @@
                     <h2 id="new-run-heading">Новый анализ</h2>
                     <form @onsubmit="StartAsync" @onsubmit:preventDefault>
                         <div class="demo-file">
-                            <label for="demo-documents">Документы PDF или TXT</label>
-                            <InputFile id="demo-documents" OnChange="ReadFilesAsync" multiple accept=".pdf,.txt" aria-describedby="file-limits" disabled="@(busy || readingFiles)" />
+                            <label for="demo-documents">Документы и сканы</label>
+                            <InputFile id="demo-documents" OnChange="ReadFilesAsync" multiple accept=".pdf,.docx,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp" aria-describedby="file-limits" disabled="@(busy || readingFiles)" />
                             <p id="file-limits" class="muted hint">До 5 файлов, до 2 МБ каждый и до 5 МБ суммарно.</p>
                             @if (readingFiles)
                             {
@@ -43,51 +43,20 @@
                         <label for="demo-title">Название закупки</label>
                         <input id="demo-title" maxlength="180" @bind="title" required />
 
-                        <div class="row demo-facts">
-                            <div>
-                                <label for="demo-quantity">Требуемое количество</label>
-                                <input id="demo-quantity" type="number" min="0" step="any" @bind="quantity" required />
-                            </div>
-                            <div>
-                                <label for="demo-available">Доступное количество</label>
-                                <input id="demo-available" type="number" min="0" step="any" @bind="available" required />
-                            </div>
-                            <div>
-                                <label for="demo-delivery-deadline">Крайняя дата поставки</label>
-                                <input id="demo-delivery-deadline" name="delivery-deadline" type="date"
-                                       autocomplete="off" @bind="deliveryDeadline"
-                                       required="@(available < quantity)" aria-describedby="demo-delivery-hint" />
-                                <p id="demo-delivery-hint" class="muted hint">Нужна, если требуется дозаказ.</p>
-                            </div>
-                            <div>
-                                <label for="demo-validity">Срок действия предложения, рабочих дней</label>
-                                <input id="demo-validity" type="number" min="0" max="3650" @bind="validity" required />
-                            </div>
-                            <div>
-                                <label for="demo-unit-cost">Себестоимость единицы</label>
-                                <input id="demo-unit-cost" type="number" min="0" step="any" @bind="unitCost" required />
-                            </div>
-                            <div>
-                                <label for="demo-offer-price">Цена предложения</label>
-                                <input id="demo-offer-price" type="number" min="0" step="any" @bind="offerPrice" required />
-                            </div>
-                            <div>
-                                <label for="demo-penalty">Неустойка в день, %</label>
-                                <input id="demo-penalty" type="number" min="0" max="100" step="any" @bind="penalty" />
-                            </div>
-                        </div>
-
-                        <label for="demo-context">Фрагмент условий для оценки риска</label>
-                        <textarea id="demo-context" rows="3" maxlength="2000" @bind="context" required aria-describedby="demo-context-hint"></textarea>
-                        <p id="demo-context-hint" class="muted hint">Используйте общедоступный фрагмент без конфиденциальных данных.</p>
-
+                        @if (manualSample)
+                        {
+                            @LotDetails
+                        }
                         @if (formError is not null)
                         {
                             <p class="error" role="alert">@formError</p>
                         }
                         <div class="dashboard-actions">
-                            <button class="primary" type="submit" disabled="@(busy || readingFiles)">@(busy ? "Запускаем…" : "Запустить анализ")</button>
-                            <button class="secondary" type="button" @onclick="FillSample" disabled="@(busy || readingFiles)">Заполнить пример</button>
+                            <button class="primary" type="submit" disabled="@(busy || readingFiles)">@(busy ? "Запускаем…" : (manualSample ? "Запустить анализ" : "Обработать документы"))</button>
+                            @if (files.Count == 0 || manualSample)
+                            {
+                                <button class="secondary" type="button" @onclick="FillSample" disabled="@(busy || readingFiles)">Заполнить пример</button>
+                            }
                         </div>
                     </form>
                 </section>
@@ -172,6 +141,80 @@
                     @if (actionError is not null)
                     {
                         <p class="error" role="alert">@actionError</p>
+                    }
+                    @if (active.Extraction is { } extraction)
+                    {
+                        <section class="card dashboard-panel" aria-labelledby="extraction-heading">
+                            <h2 id="extraction-heading">Требования из документов</h2>
+                            <p role="status">@ExtractionStatusLabel(extraction.Status)</p>
+                            @if (extraction.Warnings.Count > 0)
+                            {
+                                <ul class="reason-list">
+                                    @foreach (var warning in extraction.Warnings)
+                                    {
+                                        <li>@warning</li>
+                                    }
+                                </ul>
+                            }
+                            @if (active is { Phase: "awaiting_extraction_confirmation", CanReviewExtraction: true })
+                            {
+                                <form @onsubmit="ConfirmExtractionAsync" @onsubmit:preventDefault>
+                                    @foreach (var draft in requirementDrafts)
+                                    {
+                                        var item = draft.Original;
+                                        var fieldId = $"requirement-{item.RequirementId:D}";
+                                        <fieldset @key="item.RequirementId">
+                                            <legend>@RequirementKindLabel(item.Kind)</legend>
+                                            <p class="muted">
+                                                @DocumentLabel(active, item.Source.FileId), стр. @item.Source.Page
+                                                @if (item.NeedsReview)
+                                                {
+                                                    <span class="badge warn">Нужно проверить</span>
+                                                }
+                                            </p>
+                                            <label for="@fieldId">Текст требования</label>
+                                            <textarea id="@fieldId" rows="2" maxlength="12000" @bind="draft.Text" required></textarea>
+                                            <label for="@($"{fieldId}-value")">Значение @item.Unit</label>
+                                            <input id="@($"{fieldId}-value")" @bind="draft.Value" />
+                                            <button class="secondary" type="button" @onclick="() => UseRiskContext(draft.Text)">Взять фрагмент для оценки риска</button>
+                                            <details>
+                                                <summary>Источник</summary>
+                                                <p>@item.Text</p>
+                                                <p class="muted">Координаты @string.Join(", ", item.Source.Bbox)</p>
+                                            </details>
+                                        </fieldset>
+                                    }
+                                    <h3>Параметры закупки и данные компании</h3>
+                                    @LotDetails
+                                    <div class="dashboard-actions">
+                                        <button class="primary" type="submit" disabled="@(busy || active.IsRunning)">Подтвердить данные и продолжить</button>
+                                    </div>
+                                </form>
+                            }
+                            else if (extraction.Requirements.Count > 0)
+                            {
+                                <ul class="reason-list">
+                                    @foreach (var item in extraction.Requirements)
+                                    {
+                                        <li @key="item.RequirementId">
+                                            <strong>@RequirementKindLabel(item.Kind)</strong>
+                                            <p>@item.Text</p>
+                                            @if (RequirementValue(item.Value) is { Length: > 0 } value)
+                                            {
+                                                <p>@value @item.Unit</p>
+                                            }
+                                            <p class="muted">@DocumentLabel(active, item.Source.FileId), стр. @item.Source.Page</p>
+                                        </li>
+                                    }
+                                </ul>
+                            }
+
+                            @if (active is { Phase: "extraction_failed", CanReviewExtraction: true })
+                            {
+                                <button class="secondary" type="button" @onclick="RetryExtractionAsync"
+                                        disabled="@(busy || active.IsRunning)">Повторить обработку документов</button>
+                            }
+                        </section>
                     }
                     @if (active.Card is { } card)
                     {
@@ -345,4 +388,46 @@ else
     <h1>Анализ закупок</h1>
     <p>Демонстрационный профиль отключён.</p>
     <a href="/">К заданиям</a>
+}
+
+@code {
+    private RenderFragment LotDetails => @<div>
+        <div class="row demo-facts">
+            <div>
+                <label for="demo-quantity">Требуемое количество</label>
+                <input id="demo-quantity" type="number" min="0" step="any" @bind="quantity" required />
+            </div>
+            <div>
+                <label for="demo-available">Доступное количество</label>
+                <input id="demo-available" type="number" min="0" step="any" @bind="available" required />
+            </div>
+            <div>
+                <label for="demo-delivery-deadline">Крайняя дата поставки</label>
+                <input id="demo-delivery-deadline" name="delivery-deadline" type="date"
+                       autocomplete="off" @bind="deliveryDeadline"
+                       required="@(available < quantity)" aria-describedby="demo-delivery-hint" />
+                <p id="demo-delivery-hint" class="muted hint">Нужна, если требуется дозаказ.</p>
+            </div>
+            <div>
+                <label for="demo-validity">Срок действия предложения, рабочих дней</label>
+                <input id="demo-validity" type="number" min="0" max="3650" @bind="validity" required />
+            </div>
+            <div>
+                <label for="demo-unit-cost">Себестоимость единицы</label>
+                <input id="demo-unit-cost" type="number" min="0" step="any" @bind="unitCost" required />
+            </div>
+            <div>
+                <label for="demo-offer-price">Цена предложения</label>
+                <input id="demo-offer-price" type="number" min="0" step="any" @bind="offerPrice" required />
+            </div>
+            <div>
+                <label for="demo-penalty">Неустойка в день, %</label>
+                <input id="demo-penalty" type="number" min="0" max="100" step="any" @bind="penalty" />
+            </div>
+        </div>
+
+        <label for="demo-context">Фрагмент условий для оценки риска</label>
+        <textarea id="demo-context" rows="3" maxlength="2000" @bind="context" required aria-describedby="demo-context-hint"></textarea>
+        <p id="demo-context-hint" class="muted hint">Используйте общедоступный фрагмент без конфиденциальных данных.</p>
+    </div>;
 }

@@ -31,8 +31,9 @@ public partial class DemoRuns
     private int runRevision;
     private List<DemoRunDto> runs = [];
     private readonly List<DemoAttachment> files = [];
+    private readonly List<RequirementDraft> requirementDrafts = [];
     private DemoRunDto? run;
-    private bool readingFiles, refreshing, busy, gone, accessDenied;
+    private bool readingFiles, refreshing, busy, gone, accessDenied, manualSample;
     private string? formError, loadError, actionError;
     private string title = string.Empty;
     private string context = string.Empty;
@@ -77,6 +78,7 @@ public partial class DemoRuns
         confirmedQuantity = null;
         additionalCost = null;
         confirmedDeliveryDate = null;
+        requirementDrafts.Clear();
 
         await RefreshAsync(token);
         if (RunId is not null && !token.IsCancellationRequested)
@@ -198,6 +200,7 @@ public partial class DemoRuns
     {
         var token = page?.Token ?? CancellationToken.None;
         readingFiles = true;
+        manualSample = false;
         formError = null;
         files.Clear();
         try
@@ -219,9 +222,20 @@ public partial class DemoRuns
             foreach (var file in selected)
             {
                 var suffix = Path.GetExtension(file.Name).ToLowerInvariant();
-                if (suffix is not (".pdf" or ".txt"))
+                var mimeType = suffix switch
                 {
-                    formError = "Принимаются только PDF и TXT.";
+                    ".pdf" => "application/pdf",
+                    ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    ".png" => "image/png",
+                    ".jpg" or ".jpeg" => "image/jpeg",
+                    ".tif" or ".tiff" => "image/tiff",
+                    ".bmp" => "image/bmp",
+                    ".webp" => "image/webp",
+                    _ => null
+                };
+                if (mimeType is null)
+                {
+                    formError = "Принимаются PDF, DOCX, PNG, JPEG, TIFF, BMP и WEBP.";
                     files.Clear();
                     return;
                 }
@@ -229,7 +243,6 @@ public partial class DemoRuns
                 await using var input = file.OpenReadStream(MaxFileBytes, token);
                 using var content = new MemoryStream();
                 await input.CopyToAsync(content, token);
-                var mimeType = suffix == ".pdf" ? "application/pdf" : "text/plain";
                 files.Add(new DemoAttachment(file.Name, mimeType, Convert.ToBase64String(content.ToArray())));
             }
         }
@@ -261,11 +274,10 @@ public partial class DemoRuns
         context = "The published draft includes a daily penalty for late delivery.";
         formError = null;
 
-        if (files.Count == 0)
-        {
-            const string sample = "Tender 341041674, lot 3. Required quantity: 996 rolls. Offer validity at least 60 working days. The published draft includes a daily penalty for late delivery.";
-            files.Add(new DemoAttachment("пример-лота-3.txt", "text/plain", Convert.ToBase64String(Encoding.UTF8.GetBytes(sample))));
-        }
+        manualSample = true;
+        files.Clear();
+        const string sample = "Tender 341041674, lot 3. Required quantity: 996 rolls. Offer validity at least 60 working days. The published draft includes a daily penalty for late delivery.";
+        files.Add(new DemoAttachment("пример-лота-3.txt", "text/plain", Convert.ToBase64String(Encoding.UTF8.GetBytes(sample))));
     }
 
     private async Task StartAsync()
@@ -276,17 +288,9 @@ public partial class DemoRuns
         }
 
         formError = null;
-        if (files.Count == 0 || string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(context) ||
-            quantity is null or <= 0 || available is null or < 0 || validity is null or < 0 or > 3650 ||
-            unitCost is null or < 0 || offerPrice is null or <= 0 || penalty is < 0 or > 100)
+        if (files.Count == 0 || string.IsNullOrWhiteSpace(title))
         {
-            formError = "Добавьте документы и проверьте обязательные параметры лота.";
-            return;
-        }
-
-        if (available < quantity && deliveryDeadline is null)
-        {
-            formError = "Укажите крайний срок поставки, чтобы согласовать дозаказ.";
+            formError = "Укажите название закупки и добавьте документы.";
             return;
         }
 
@@ -294,13 +298,20 @@ public partial class DemoRuns
         busy = true;
         try
         {
-            var facts = new DemoFacts(quantity.Value, validity.Value, unitCost.Value, offerPrice.Value,
-                available.Value, penalty, deliveryDeadline);
-            var created = await Gateway.StartDemoRunAsync(
-                new DemoRunInput(title.Trim(), [.. files], facts, context.Trim()), token);
+            var input = new DemoRunInput(title.Trim(), [.. files]);
+            if (manualSample)
+            {
+                if (!TryReadFacts(out var facts, out formError))
+                {
+                    return;
+                }
+                input = input with { Facts = facts, Context = context.Trim() };
+            }
+            var created = await Gateway.StartDemoRunAsync(input, token);
             if (!token.IsCancellationRequested)
             {
                 files.Clear();
+                manualSample = false;
                 Navigation.NavigateTo($"/demo/{created.Id}");
             }
         }
@@ -326,6 +337,74 @@ public partial class DemoRuns
                 busy = false;
             }
         }
+    }
+
+    private bool TryReadFacts(out DemoFacts? facts, out string? error)
+    {
+        facts = null;
+        if (string.IsNullOrWhiteSpace(context) || context.Trim().Length > 2000 ||
+            quantity is null or <= 0 || available is null or < 0 || validity is null or < 0 or > 3650 ||
+            unitCost is null or < 0 || offerPrice is null or <= 0 || penalty is < 0 or > 100)
+        {
+            error = "Проверьте параметры закупки, данные компании и фрагмент для оценки риска.";
+            return false;
+        }
+        if (available < quantity && deliveryDeadline is null)
+        {
+            error = "Укажите крайний срок поставки, чтобы согласовать дозаказ.";
+            return false;
+        }
+
+        facts = new DemoFacts(quantity.Value, validity.Value, unitCost.Value, offerPrice.Value,
+            available.Value, penalty, deliveryDeadline);
+        error = null;
+        return true;
+    }
+
+    private async Task ConfirmExtractionAsync()
+    {
+        if (run is not { Phase: "awaiting_extraction_confirmation", CanReviewExtraction: true } active)
+        {
+            return;
+        }
+        if (!TryReadFacts(out var facts, out actionError) || facts is null)
+        {
+            return;
+        }
+        if (requirementDrafts.Any(item => string.IsNullOrWhiteSpace(item.Text)))
+        {
+            actionError = "Заполните текст каждого требования.";
+            return;
+        }
+
+        var input = new DemoExtractionConfirmation(
+            facts, context.Trim(), requirementDrafts.Select(item => item.ToCorrection()).ToArray());
+        await RunActionAsync(async token =>
+        {
+            var updated = await Gateway.ConfirmDemoExtractionAsync(active.Id, input, token);
+            if (!token.IsCancellationRequested)
+            {
+                runRevision++;
+                SetRun(updated);
+            }
+        });
+    }
+
+    private async Task RetryExtractionAsync()
+    {
+        if (run is not { Phase: "extraction_failed", CanReviewExtraction: true } active)
+        {
+            return;
+        }
+        await RunActionAsync(async token =>
+        {
+            var updated = await Gateway.RetryDemoExtractionAsync(active.Id, token);
+            if (!token.IsCancellationRequested)
+            {
+                runRevision++;
+                SetRun(updated);
+            }
+        });
     }
 
     private async Task DecideAsync(Guid cardId, string decision)
@@ -433,7 +512,68 @@ public partial class DemoRuns
             confirmedDeliveryDate = null;
         }
 
+        if (updated.Phase == "awaiting_extraction_confirmation" &&
+            (run?.Id != updated.Id || run?.Phase != updated.Phase))
+        {
+            requirementDrafts.Clear();
+            requirementDrafts.AddRange((updated.Extraction?.Requirements ?? []).Select(item => new RequirementDraft(item)));
+            quantity = updated.Facts?.Quantity;
+            validity = updated.Facts?.OfferValidityWorkdays;
+            unitCost = updated.Facts?.UnitCost;
+            offerPrice = updated.Facts?.OfferPrice;
+            available = updated.Facts?.AvailableQuantity;
+            penalty = updated.Facts?.PenaltyDailyPercent;
+            deliveryDeadline = updated.Facts?.DeliveryDeadline;
+            context = updated.Context ?? string.Empty;
+        }
+
         run = updated;
+    }
+
+    private void UseRiskContext(string text) => context = text.Length > 2000 ? text[..2000] : text;
+
+    private static string DocumentLabel(DemoRunDto run, Guid fileId) =>
+        run.Documents.FirstOrDefault(document => document.FileId == fileId)?.Name ?? fileId.ToString("D");
+
+    private static string RequirementKindLabel(string kind) => kind switch
+    {
+        "penalty" => "Неустойка",
+        "deadline" => "Срок",
+        "security" => "Обеспечение",
+        "qualification" => "Квалификация",
+        "resource" => "Ресурсы",
+        "financial" => "Финансовое условие",
+        _ => "Другое требование"
+    };
+
+    private static string ExtractionStatusLabel(string status) => status switch
+    {
+        "OK" => "Документы обработаны",
+        "INCOMPLETE" => "Нужна проверка извлечённых данных",
+        "REJECTED" => "Документ отклонён",
+        "FAILED" => "Обработка документов не выполнена",
+        _ => status
+    };
+
+    private static string RequirementValue(JsonElement? value) =>
+        value is { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) } scalar
+            ? scalar.ToString()
+            : string.Empty;
+
+    private sealed class RequirementDraft(DemoExtractedRequirementDto requirement)
+    {
+        public DemoExtractedRequirementDto Original { get; } = requirement;
+        public string Text { get; set; } = requirement.Text;
+        public string Value { get; set; } = RequirementValue(requirement.Value);
+
+        public DemoRequirementCorrection ToCorrection()
+        {
+            var value = Value.Trim();
+            JsonElement? confirmedValue = value == RequirementValue(Original.Value)
+                ? Original.Value
+                : value.Length == 0 ? null : JsonSerializer.SerializeToElement(value);
+            return new DemoRequirementCorrection(Original.RequirementId, Text.Trim(), confirmedValue);
+        }
     }
 
     private void DisposePage()
@@ -450,6 +590,8 @@ public partial class DemoRuns
     private static string StatusLabel(string status, string phase) => (status, phase) switch
     {
         (_, "declined" or "cancelled") => "Отклонено",
+        (_, "awaiting_extraction_confirmation") => "Ждёт проверки документов",
+        (_, "extraction_failed") => "Ошибка обработки документов",
         ("DONE", _) => "Анализ завершён",
         ("ERROR", _) => "Анализ остановлен",
         ("WAITING_HUMAN", _) => "Ждёт согласования",

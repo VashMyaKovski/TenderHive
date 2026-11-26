@@ -705,7 +705,7 @@ async def test_migration_003_recovers_dev_decisions_and_pending_review(
     schema = f"orchestrator_upgrade_{uuid4().hex}"
     database = Database(make_conninfo(base_conninfo, options=f"-csearch_path={schema}"), 4)
     scripts = migration_scripts()
-    assert [version for version, _ in scripts] == [1, 2, 3]
+    assert [version for version, _ in scripts] == [1, 2, 3, 4]
     async with base_db.connect() as connection:
         await connection.execute(SQL("CREATE SCHEMA {}").format(Identifier(schema)))
     try:

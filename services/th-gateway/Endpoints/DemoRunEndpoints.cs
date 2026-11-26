@@ -39,6 +39,15 @@ public static class DemoRunEndpoints
             return Results.Accepted(value: await service.DecideAsync(runId, decision, context.User.ToUserContext(), ct));
         });
 
+        runs.MapPost("/{runId:guid}/extraction/confirm", async (Guid runId, HttpContext context, DemoRuns service, CancellationToken ct) =>
+        {
+            var input = await ReadAsync<DemoExtractionConfirmation>(context, MaxBodySize, ct);
+            return Results.Accepted(value: await service.ConfirmExtractionAsync(runId, input, context.User.ToUserContext(), ct));
+        });
+
+        runs.MapPost("/{runId:guid}/extraction/retry", async (Guid runId, HttpContext context, DemoRuns service, CancellationToken ct) =>
+            Results.Accepted(value: await service.RetryExtractionAsync(runId, context.User.ToUserContext(), ct)));
+
         runs.MapGet("/{runId:guid}/artifacts/{name}", async (Guid runId, string name, HttpContext context, DemoRuns service, CancellationToken ct) =>
         {
             var download = await service.DownloadAsync(runId, name, context.User.ToUserContext(), ct);

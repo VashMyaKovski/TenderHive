@@ -113,6 +113,27 @@ public sealed class DemoRuns(DemoWorkbenchClient workbench, DemoRunRegistry regi
         return await workbench.DownloadAsync(id, name, ct);
     }
 
+    public async Task<DemoRunDto> ConfirmExtractionAsync(
+        Guid id, DemoExtractionConfirmation input, UserContext actor, CancellationToken ct)
+    {
+        RequireExtractionOwner(id, actor);
+        return Present(await workbench.ConfirmExtractionAsync(id, input, ct), actor, owner: true);
+    }
+
+    public async Task<DemoRunDto> RetryExtractionAsync(Guid id, UserContext actor, CancellationToken ct)
+    {
+        RequireExtractionOwner(id, actor);
+        return Present(await workbench.RetryExtractionAsync(id, ct), actor, owner: true);
+    }
+
+    private void RequireExtractionOwner(Guid id, UserContext actor)
+    {
+        if (!Find(id).IsOwner(actor))
+        {
+            throw new ApiException(404, "Прогон не найден.");
+        }
+    }
+
     private DemoRunAccess Find(Guid id) => registry.Find(id)
         ?? throw new ApiException(404, "Прогон не найден.");
 
@@ -146,6 +167,7 @@ public sealed class DemoRuns(DemoWorkbenchClient workbench, DemoRunRegistry regi
     private static DemoRunDto Present(DemoRunDto run, UserContext actor, bool owner) => run with
     {
         Card = run.Card is null ? null : run.Card with { CanDecide = CanDecide(run.Card, actor) },
+        CanReviewExtraction = owner,
         Artifacts = owner && run is { Status: "DONE", Phase: "done" }
             ? run.Artifacts.Where(file => DemoWorkbenchClient.ArtifactContentType(file.Name) is not null)
                 .Select(file => file with { Url = $"/api/demo/runs/{run.Id:D}/artifacts/{file.Name}" }).ToArray()

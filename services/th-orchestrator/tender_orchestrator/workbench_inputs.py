@@ -10,7 +10,7 @@ from pathlib import PurePath
 from typing import Annotated, Literal
 from uuid import UUID, uuid5
 
-from pydantic import Field, StringConstraints
+from pydantic import Field, JsonValue, StringConstraints, model_validator
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
@@ -26,7 +26,18 @@ DEMO_MINIMUM_VALIDITY_WORKDAYS = 60
 _MAX_ENCODED = 4 * ((MAX_FILE_BYTES + 2) // 3)
 _MAX_PREVIEW_PAGES = 5
 _MAX_PAGE_BYTES = 512 * 1024
-_MIMES = {".pdf": "application/pdf", ".txt": "text/plain"}
+_MIMES = {
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    ".bmp": "image/bmp",
+    ".webp": "image/webp",
+}
 
 
 class Attachment(Contract):
@@ -48,8 +59,29 @@ class Facts(Contract):
 class RunInput(Contract):
     title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=180)]
     documents: Annotated[list[Attachment], Field(min_length=1, max_length=5)]
+    facts: Facts | None = None
+    context: (
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def validate_manual_inputs(self) -> RunInput:
+        if (self.facts is None) != (self.context is None):
+            raise ValueError("Передайте сведения и фрагмент вместе.")
+        return self
+
+
+class RequirementEdit(Contract):
+    requirement_id: UUID
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=12000)]
+    value: str | bool | int | float | None
+
+
+class ExtractionConfirmation(Contract):
     facts: Facts
     context: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    requirements: Annotated[list[RequirementEdit], Field(max_length=200)]
 
 
 class DecisionInput(Contract):
@@ -75,7 +107,7 @@ def load_uploads(run_id: UUID, incoming: RunInput, bound_url: str) -> list[Uploa
         suffix = PurePath(name).suffix.lower()
         mime = _MIMES.get(suffix)
         if mime is None:
-            raise ValueError("Загрузите документ PDF или TXT.")
+            raise ValueError("Загрузите PDF, DOCX, изображение или TXT.")
         if item.content_type not in {"", mime, "application/octet-stream"}:
             raise ValueError("Тип файла не соответствует расширению.")
         try:
@@ -91,21 +123,29 @@ def load_uploads(run_id: UUID, incoming: RunInput, bound_url: str) -> list[Uploa
                     raise ValueError("TXT-файл пуст или имеет неверный формат.")
             except UnicodeDecodeError:
                 raise ValueError("TXT-файл должен быть сохранён в UTF-8.") from None
-        elif not data.startswith(b"%PDF-"):
+        elif suffix == ".pdf" and not data.startswith(b"%PDF-"):
             raise ValueError("У PDF-файла неверный заголовок.")
         uploads.append(_upload(run_id, f"attachment:{index}", bound_url, name, mime, data))
     return uploads
 
 
 def normalization_record(run_id: UUID, incoming: RunInput, bound_url: str) -> Upload:
+    return confirmed_normalization_record(
+        run_id, incoming.title, incoming.facts, incoming.context, bound_url
+    )
+
+
+def confirmed_normalization_record(
+    run_id: UUID, title: str, facts: Facts | None, context: str | None, bound_url: str
+) -> Upload:
+    record: dict[str, JsonValue] = {
+        "source": "Сведения, подтверждённые оператором",
+        "title": title,
+        "public_excerpt": context,
+        "operator_facts": facts.model_dump(mode="json") if facts is not None else None,
+    }
     data = json.dumps(
-        {
-            "source": "Ручной ввод оператора и демонстрационный профиль",
-            "title": incoming.title,
-            "public_excerpt": incoming.context,
-            "operator_facts": incoming.facts.model_dump(mode="json"),
-            "demo_minimum_offer_validity_workdays": DEMO_MINIMUM_VALIDITY_WORKDAYS,
-        },
+        record,
         ensure_ascii=False,
         indent=2,
     ).encode("utf-8")
@@ -132,6 +172,8 @@ def _upload(run_id: UUID, key: str, bound_url: str, name: str, mime: str, data: 
 def has_readable_text(upload: Upload) -> bool:
     if upload.document.mime == "text/plain":
         return True
+    if upload.document.mime != "application/pdf":
+        return False
     try:
         reader = PdfReader(BytesIO(upload.data), strict=False)
         if reader.is_encrypted:
